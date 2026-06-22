@@ -57,6 +57,10 @@ class ChatServer:
         self.clients: Dict[str, PeerConnection] = {}
         self._lock = asyncio.Lock()
         self._server = None
+
+        # Сигнал что сервер готов принимать подключения
+        self._ready_event = asyncio.Event()
+
         self._rate_limiter = RateLimiter()
         self._auth = AuthManager(password)
         self._nonce_checker = MessageProtection()
@@ -89,6 +93,8 @@ class ChatServer:
         logger.info("Server listening on %s:%d (%s, auth: %s, e2e: %s)",
                     self.host, self.port, tls_status, auth_status, e2e_status)
 
+        self._ready_event.set()
+
         async with self._server:
             await self._server.serve_forever()
 
@@ -103,7 +109,13 @@ class ChatServer:
                 await client.close()
             self.clients.clear()
 
+        self._ready_event.clear()
         logger.info("Server stopped")
+
+    @property
+    def is_ready(self) -> bool:
+        """Готов ли сервер принимать подключения."""
+        return self._ready_event.is_set()
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
