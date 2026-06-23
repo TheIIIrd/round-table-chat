@@ -13,6 +13,7 @@ from core.protocol import read_message, send_message, ProtocolError, MessageProt
 from core.auth import AuthManager
 from core.tls import create_client_ssl_context
 from core.e2e import E2EManager
+from client.plugin_manager import PluginManager
 from utils.validators import parse_peer_address
 from utils.logging_config import get_logger
 
@@ -64,8 +65,11 @@ class ChatClient:
         # E2E сессия с сервером установлена?
         self._e2e_ready = False
 
+        self.plugin_manager = PluginManager(self)
+
     async def start(self) -> None:
         """Запускает клиент."""
+        self.plugin_manager.load_builtin()
         if self.peer_addr:
             await self._connect_to_server()
         else:
@@ -94,6 +98,7 @@ class ChatClient:
 
         self.ui.connected = False
         self.ui.status_text = "Disconnected"
+        await self.plugin_manager.on_disconnect()
         logger.info("Client stopped")
 
     async def _start_as_server(self) -> None:
@@ -234,6 +239,8 @@ class ChatClient:
             await self.stop()
             return
 
+        await self.plugin_manager.on_connect()
+
         self._receive_task = asyncio.create_task(self._receive_loop())
 
     async def _setup_e2e(self, welcome_msg: dict) -> None:
@@ -333,14 +340,18 @@ class ChatClient:
 
         if sender_nick != self.ui.my_nickname:
             self.ui.add_message(plaintext, 'peer', sender_nick)
+            # Даём плагинам проанализировать сообщение
+            await self.plugin_manager.on_message(sender_nick, plaintext)
 
     async def send_text(self, text: str) -> None:
         """Отправляет текстовое сообщение (или команду)."""
-        from client.commands import CommandHandler
-
-        cmd_handler = CommandHandler(self)
-        is_command = await cmd_handler.handle(text)
-        if is_command:
+        # Сначала пробуем плагины
+        if text.startswith('/'):
+            handled = await self.plugin_manager.handle_command(text)
+            if handled:
+                return
+            # Команда не распознана
+            self.ui.add_system(f"Unknown command: {text.split()[0]}. Type /help for available commands")
             return
 
         if not self.writer or not self.session or not self.session.ready:
@@ -354,7 +365,6 @@ class ChatClient:
             if self.enable_e2e and self._e2e_ready:
                 # E2E режим: шифруем для сервера и для всех пиров
                 server_payload, peer_payloads = self._e2e_manager.encrypt_for_all(text)
-
                 await send_message(self.writer, {
                     "type": "chat",
                     "server_payload": base64.b64encode(server_payload).decode('ascii'),
