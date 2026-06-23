@@ -65,31 +65,31 @@ Examples:
     return parser.parse_args()
 
 
-def validate_args(args) -> bool:
+def validate_args(parsed_args) -> bool:
     """Валидация аргументов."""
-    is_valid, error = validate_nickname(args.nick)
+    is_valid, error = validate_nickname(parsed_args.nick)
     if not is_valid:
         print(f"Invalid nickname: {error}", file=sys.stderr)
         return False
 
-    if args.port < 1 or args.port > 65535:
-        print(f"Invalid port: {args.port}", file=sys.stderr)
+    if parsed_args.port < 1 or parsed_args.port > 65535:
+        print(f"Invalid port: {parsed_args.port}", file=sys.stderr)
         return False
 
-    if args.peer:
+    if parsed_args.peer:
         from utils.validators import parse_peer_address
-        _, _, error = parse_peer_address(args.peer)
+        _, _, error = parse_peer_address(parsed_args.peer)
         if error:
             print(f"Invalid peer address: {error}", file=sys.stderr)
             return False
 
-    if args.password is not None and len(args.password) < 4:
+    if parsed_args.password is not None and len(parsed_args.password) < 4:
         print("Password must be at least 4 characters", file=sys.stderr)
         return False
 
-    if args.tls:
-        cert_dir = Path(args.cert_dir)
-        if not args.peer:
+    if parsed_args.tls:
+        cert_dir = Path(parsed_args.cert_dir)
+        if not parsed_args.peer:
             server_cert = cert_dir / "server.crt"
             server_key = cert_dir / "server.key"
             if not server_cert.exists() or not server_key.exists():
@@ -97,7 +97,7 @@ def validate_args(args) -> bool:
                 print(f"Generate: python -m core.tls --generate", file=sys.stderr)
                 return False
 
-    if args.e2e and not args.peer:
+    if parsed_args.e2e and not parsed_args.peer:
         # Сервер с E2E — OK, клиент внутри тоже будет с E2E
         pass
 
@@ -130,14 +130,14 @@ async def input_loop(ui: ChatUI, client: ChatClient) -> None:
             logger.error("Error in input loop: %s", e)
 
 
-def main(stdscr, args):
+def main(stdscr, parsed_args):
     """Точка входа curses."""
-    ui = ChatUI(stdscr, args.nick)
+    ui = ChatUI(stdscr, parsed_args.nick)
     client = ChatClient(
-        ui, args.host, args.port, args.peer,
-        password=args.password,
-        use_tls=args.tls,
-        enable_e2e=args.e2e
+        ui, parsed_args.host, parsed_args.port, parsed_args.peer,
+        password=parsed_args.password,
+        use_tls=parsed_args.tls,
+        enable_e2e=parsed_args.e2e
     )
 
     async def run():

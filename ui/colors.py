@@ -30,8 +30,8 @@ def init_colors() -> None:
     Инициализирует все цветовые пары curses.
     Должна вызываться один раз при старте UI.
     """
-    for color_name, (color, pair_id) in COLOR_POOL.items():
-        curses.init_pair(pair_id, color, -1)  # -1 — использовать дефолтный фон терминала
+    for color, pair_id in COLOR_POOL.values():
+        curses.init_pair(pair_id, color, -1)
 
 
 def get_nickname_color_index(nickname: str, color_map: Dict[str, str]) -> str:
