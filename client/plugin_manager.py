@@ -4,7 +4,6 @@
 
 import importlib
 import pkgutil
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from client.plugins.base import PluginBase, PluginAPI
@@ -25,7 +24,9 @@ class PluginManager:
         self._command_map: dict[str, PluginBase] = {}
 
     def load_builtin(self) -> None:
+        """Автоматически загружает все плагины из client/plugins/."""
         import client.plugins as pkg
+
         logger.info("Loading plugins from %s", pkg.__path__)
 
         for _, module_name, _ in pkgutil.iter_modules(pkg.__path__):

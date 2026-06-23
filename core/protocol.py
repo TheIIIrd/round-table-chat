@@ -12,7 +12,7 @@ import json
 import asyncio
 import time
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 PROTOCOL_MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 МБ
@@ -24,7 +24,6 @@ MAX_SEEN_NONCES = 10000
 
 class ProtocolError(Exception):
     """Ошибка протокола: невалидное сообщение, превышен размер и т.д."""
-    pass
 
 
 class MessageProtection:

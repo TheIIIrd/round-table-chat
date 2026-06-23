@@ -14,17 +14,14 @@ class DicePlugin(PluginBase):
         "/choose": "Choose from options: /choose pizza sushi burger",
     }
 
-    def __init__(self, api: PluginAPI):
-        super().__init__(api)
-
     async def handle_command(self, command: str, args: str) -> bool:
         if command == "/roll":
             await self._roll(args)
             return True
-        elif command == "/flip":
+        if command == "/flip":
             await self._flip()
             return True
-        elif command == "/choose":
+        if command == "/choose":
             await self._choose(args)
             return True
         return False

@@ -22,9 +22,6 @@ class BuiltinPlugin(PluginBase):
         "/help":  "Show available commands",
     }
 
-    def __init__(self, api: PluginAPI):
-        super().__init__(api)
-
     async def handle_command(self, command: str, args: str) -> bool:
         handlers = {
             "/nick":  self._cmd_nick,

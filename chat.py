@@ -22,7 +22,7 @@ import os
 import sys
 from pathlib import Path
 
-from core.protocol import PROTOCOL_MAX_MESSAGE_SIZE, NONCE_MAX_AGE_SECONDS
+from core.protocol import PROTOCOL_MAX_MESSAGE_SIZE
 from core.tls import DEFAULT_CERT_DIR
 from ui.chat_ui import ChatUI
 from client.client import ChatClient

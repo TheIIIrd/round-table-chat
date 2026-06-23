@@ -9,7 +9,7 @@
 5. on_message(sender, text) — при получении любого сообщения
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import TYPE_CHECKING
 
 from core.protocol import send_message
@@ -97,11 +97,9 @@ class PluginBase(ABC):
 
     async def on_connect(self) -> None:
         """Вызывается после успешного подключения к серверу."""
-        pass
 
     async def on_disconnect(self) -> None:
         """Вызывается при отключении от сервера."""
-        pass
 
     # Обработка команд
 
@@ -126,4 +124,3 @@ class PluginBase(ABC):
         Вызывается при получении ЛЮБОГО сообщения.
         Плагин может анализировать чат и реагировать.
         """
-        pass
