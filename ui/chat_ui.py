@@ -25,7 +25,6 @@ logger = get_logger(__name__)
 MAX_MESSAGES = 500
 INPUT_WIN_HEIGHT = 3
 MAX_VISIBLE_USERS = 10
-MAX_INPUT_PROMPT = "[@                    ] "  # для расчёта ширины
 
 
 class ChatUI:
@@ -102,44 +101,127 @@ class ChatUI:
         self.input_win.refresh()
 
     def _draw_history(self) -> None:
-        """Отрисовывает историю сообщений с автоскроллом."""
+        """Отрисовывает историю с переносом длинных сообщений."""
         self.history_win.clear()
 
-        display_msgs = list(self.messages)
-        available_lines = self.max_y - INPUT_WIN_HEIGHT - 1  # -1 под статус-бар
-        start_idx = max(0, len(display_msgs) - available_lines)
+        # Считаем сколько строк займёт каждое сообщение
+        available_lines = self.max_y - INPUT_WIN_HEIGHT - 1
 
-        for i, msg in enumerate(display_msgs[start_idx:], start=0):
+        # Идём с конца, пока не наберём available_lines строк
+        visible_msgs = []
+        lines_used = 0
+
+        for msg in reversed(self.messages):
+            msg_lines = self._count_message_lines(msg)
+            if lines_used + msg_lines > available_lines:
+                # Частично влезает — показываем сколько можем
+                if lines_used < available_lines:
+                    visible_msgs.insert(0, (msg, available_lines - lines_used))
+                break
+            visible_msgs.insert(0, (msg, 0))  # 0 = показываем полностью
+            lines_used += msg_lines
+
+        # Рисуем
+        current_row = 0
+        for msg, max_lines in visible_msgs:
             try:
-                self._draw_single_message(i, msg)
+                if max_lines > 0:
+                    # Показываем частично (первые max_lines строк)
+                    lines = self._draw_single_message(current_row, msg)
+                    current_row += min(lines, max_lines)
+                else:
+                    current_row += self._draw_single_message(current_row, msg)
             except curses.error:
-                # Терминал слишком мал, похуй
                 pass
 
-    def _draw_single_message(self, row: int, msg: Message) -> None:
-        """Отрисовывает одно сообщение."""
+    def _count_message_lines(self, msg: Message) -> int:
+        """Считает сколько строк займёт сообщение."""
         if msg.is_system:
-            text = f"  *** {msg.text}"[:self.max_x - 1]
-            self.history_win.addstr(row, 0, text, curses.color_pair(PAIR_SYSTEM_MSG))
-            return
+            return len(self._wrap_text(f"  *** {msg.text}", self.max_x - 1))
+
+        prefix = f"{msg.format_timestamp()} [{msg.nickname}]:  "
+        text_width = max(1, self.max_x - len(prefix))
+        return len(self._wrap_text(msg.text, text_width))
+
+    @staticmethod
+    def _wrap_text(text: str, max_width: int) -> list:
+        """
+        Переносит текст на строки не шире max_width.
+        Слова длиннее max_width — обрезаются.
+        """
+        words = text.split(' ')
+        lines = []
+        current_line = ""
+
+        for word in words:
+            # Если слово само по себе длиннее ширины — обрезаем
+            if len(word) > max_width:
+                # Добиваем текущую строку
+                if current_line:
+                    lines.append(current_line.rstrip())
+                    current_line = ""
+                # Режем длинное слово на куски
+                for i in range(0, len(word), max_width):
+                    lines.append(word[i:i + max_width])
+                continue
+
+            # Пробуем добавить слово к текущей строке
+            test_line = f"{current_line} {word}".strip() if current_line else word
+
+            if len(test_line) <= max_width:
+                current_line = test_line
+            else:
+                # Не влезает — закрываем строку, начинаем новую
+                lines.append(current_line.rstrip())
+                current_line = word
+
+        # Последняя строка
+        if current_line:
+            lines.append(current_line.rstrip())
+
+        return lines
+
+    def _draw_single_message(self, start_row: int, msg: Message) -> int:
+        """
+        Отрисовывает одно сообщение с переносом по словам.
+        Возвращает количество использованных строк.
+        """
+        if msg.is_system:
+            text = f"  *** {msg.text}"
+            wrapped = self._wrap_text(text, self.max_x - 1)
+            for i, line in enumerate(wrapped):
+                self.history_win.addstr(start_row + i, 0, line[:self.max_x - 1],
+                                         curses.color_pair(PAIR_SYSTEM_MSG))
+            return len(wrapped)
 
         timestamp = msg.format_timestamp()
-
-        # Временная метка (тусклая)
-        self.history_win.addstr(row, 0, timestamp, curses.A_DIM)
-
-        # [nickname] с цветом и жирным
-        bracket_start = len(timestamp) + 1
         nick_str = f"[{msg.nickname}]"
         color_name = get_nickname_color_index(msg.nickname, self._nickname_color_map)
         color_attr = curses.color_pair(get_color_pair(color_name)) | curses.A_BOLD
-        self.history_win.addstr(row, bracket_start, nick_str, color_attr)
 
-        # Текст сообщения
-        msg_start = bracket_start + len(nick_str) + 2
-        if msg_start < self.max_x:
-            remaining = self.max_x - msg_start - 1
-            self.history_win.addstr(row, msg_start, msg.text[:remaining])
+        # Ширина для текста сообщения (после таймстемпа и ника)
+        prefix = f"{timestamp} {nick_str}:  "
+        prefix_len = len(prefix)
+        text_width = self.max_x - prefix_len
+
+        if text_width <= 0:
+            return 0
+
+        # Переносим текст
+        wrapped = self._wrap_text(msg.text, text_width)
+
+        # Рисуем первую строку с префиксом
+        self.history_win.addstr(start_row, 0, timestamp, curses.A_DIM)
+        self.history_win.addstr(start_row, len(timestamp) + 1, nick_str, color_attr)
+        self.history_win.addstr(start_row, len(timestamp) + 1 + len(nick_str) + 2,
+                                 wrapped[0] if wrapped else "")
+
+        # Остальные строки — только текст, с отступом под ник
+        indent = " " * (len(timestamp) + 1 + len(nick_str) + 2)
+        for i, line in enumerate(wrapped[1:], start=1):
+            self.history_win.addstr(start_row + i, 0, f"{indent}{line}"[:self.max_x - 1])
+
+        return len(wrapped) if wrapped else 1
 
     def _draw_status_bar(self) -> None:
         """Отрисовывает статус-бар со списком онлайна."""

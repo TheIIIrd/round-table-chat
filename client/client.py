@@ -97,7 +97,6 @@ class ChatClient:
         logger.info("Client stopped")
 
     async def _start_as_server(self) -> None:
-        """Запускает встроенный сервер."""
         self._server_mode = True
 
         from server.server import ChatServer
@@ -107,10 +106,30 @@ class ChatClient:
             use_tls=self.use_tls,
             enable_e2e=self.enable_e2e
         )
-        asyncio.create_task(self._server.start())
 
-        await asyncio.sleep(0.5)
+        # Запускаем сервер в фоне
+        server_task = asyncio.create_task(self._server.start())
 
+        try:
+            # Ждём пока сервер реально начнёт слушать (с таймаутом)
+            await asyncio.wait_for(self._server._ready_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            self.ui.add_system(f"Server failed to start on {self.host}:{self.port} (timeout)")
+            logger.error("Server start timeout on %s:%d", self.host, self.port)
+            server_task.cancel()
+            await self.stop()
+            return
+
+        # Проверяем что задача не упала с исключением
+        if server_task.done():
+            exception = server_task.exception()
+            if exception:
+                self.ui.add_system(f"Server error: {exception}")
+                logger.error("Server crashed: %s", exception)
+                await self.stop()
+                return
+
+        self.ui.add_system(f"Server started on {self.host}:{self.port}")
         self.peer_addr = f"127.0.0.1:{self.port}"
         await self._connect_to_server()
 
