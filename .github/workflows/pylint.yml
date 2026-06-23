@@ -20,5 +20,4 @@ jobs:
         pip install pylint cryptography
     - name: Analysing the code with pylint
       run: |
-        PYTHONPATH=./ pylint --fail-under=8.50 $(git ls-files '*.py')
-
+        PYTHONPATH=./ pylint --fail-under=9.00 $(git ls-files '*.py')

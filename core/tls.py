@@ -10,6 +10,7 @@ TLS support for encrypted transport.
 import datetime
 import os
 import ssl
+import ipaddress
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -155,7 +156,6 @@ def create_client_ssl_context(
 # Утилита командной строки для генерации сертификатов
 if __name__ == "__main__":
     import argparse
-    import ipaddress
 
     parser = argparse.ArgumentParser(description="TLS certificate generator")
     parser.add_argument("--generate", action="store_true", help="Generate certificates")

@@ -78,7 +78,7 @@ def validate_args(args) -> bool:
 
     if args.peer:
         from utils.validators import parse_peer_address
-        host, port, error = parse_peer_address(args.peer)
+        _, _, error = parse_peer_address(args.peer)
         if error:
             print(f"Invalid peer address: {error}", file=sys.stderr)
             return False

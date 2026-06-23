@@ -75,7 +75,7 @@ class ChatServer:
     async def start(self) -> None:
         """Запускает сервер."""
         if self.use_tls:
-            self._ssl_context, cert_path, key_path = create_server_ssl_context(
+            self._ssl_context, cert_path, _ = create_server_ssl_context(
                 self.cert_dir, auto_generate=True
             )
             logger.info("TLS enabled: cert=%s", cert_path)
