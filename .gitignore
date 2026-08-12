@@ -1,6 +1,11 @@
 # Created by https://www.toptal.com/developers/gitignore/api/python,pycharm,visualstudio,visualstudiocode,vim,emacs,zsh,powershell,linux,macos,windows
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,pycharm,visualstudio,visualstudiocode,vim,emacs,zsh,powershell,linux,macos,windows
 
+### Special ###
+tests/vectors/
+*.key
+known_peers.json
+
 ### Emacs ###
 # -*- mode: gitignore; -*-
 *~
