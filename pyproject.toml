@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "p2pchat"
+version = "0.4.0"
+description = "Безопасный консольный P2P-чат: Noise_XX, попарный меш, файлы, бот"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+console = ["prompt_toolkit>=3.0"]
+dev = ["pytest>=7", "hypothesis>=6"]
+
+[project.scripts]
+p2pchat = "p2pchat.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["p2pchat*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

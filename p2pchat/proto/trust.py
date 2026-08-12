@@ -1,0 +1,115 @@
+"""Список известных пиров: TOFU и отметка о сверке SAS.
+
+Noise_XX доказывает владение ключом, но не отвечает на вопрос «чей это ключ».
+Ответ даёт человек — один раз, сверив SAS голосом. Здесь этот ответ хранится,
+чтобы не переспрашивать при каждом соединении.
+
+Ключевой сценарий — смена ключа у известного пира. Это либо переустановка у
+него, либо атака. Отличить их программа не может, поэтому она не гадает:
+соединение отвергается, а решение остаётся человеку.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+
+from ..crypto.identity import fingerprint
+
+
+class TrustDecision(Enum):
+    NEW = "new"  # видим впервые
+    KNOWN = "known"  # ключ совпал, SAS ещё не сверялся
+    VERIFIED = "verified"  # ключ совпал и был сверен человеком
+    KEY_CHANGED = "key_changed"  # ключ не тот, что записан ранее
+
+
+@dataclass
+class PeerRecord:
+    nick: str
+    key: str  # публичный ключ в hex
+    verified: bool = False
+    note: str = ""
+
+    def to_json(self) -> dict:
+        return {"nick": self.nick, "key": self.key, "verified": self.verified, "note": self.note}
+
+
+@dataclass
+class TrustStore:
+    path: Path
+    peers: dict[str, PeerRecord] = field(default_factory=dict)  # nick -> запись
+
+    @classmethod
+    def load(cls, path: str | Path) -> "TrustStore":
+        path = Path(path)
+        if not path.exists():
+            return cls(path=path)
+        try:
+            raw = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"список известных пиров повреждён: {exc}") from exc
+        peers = {
+            item["nick"]: PeerRecord(
+                nick=item["nick"],
+                key=item["key"],
+                verified=bool(item.get("verified", False)),
+                note=item.get("note", ""),
+            )
+            for item in raw.get("peers", [])
+        }
+        return cls(path=path, peers=peers)
+
+    def save(self) -> None:
+        payload = {"peers": [record.to_json() for record in self.peers.values()]}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
+
+    def by_key(self, public: bytes) -> PeerRecord | None:
+        hexed = public.hex()
+        for record in self.peers.values():
+            if record.key == hexed:
+                return record
+        return None
+
+    def check(self, nick: str, public: bytes) -> TrustDecision:
+        record = self.peers.get(nick)
+        if record is None:
+            return TrustDecision.NEW
+        if record.key != public.hex():
+            return TrustDecision.KEY_CHANGED
+        return TrustDecision.VERIFIED if record.verified else TrustDecision.KNOWN
+
+    def remember(self, nick: str, public: bytes, *, verified: bool = False) -> PeerRecord:
+        record = PeerRecord(nick=nick, key=public.hex(), verified=verified)
+        self.peers[nick] = record
+        self.save()
+        return record
+
+    def mark_verified(self, nick: str) -> bool:
+        record = self.peers.get(nick)
+        if record is None:
+            return False
+        record.verified = True
+        self.save()
+        return True
+
+    def forget(self, nick: str) -> bool:
+        if self.peers.pop(nick, None) is None:
+            return False
+        self.save()
+        return True
+
+    def describe(self, nick: str) -> str:
+        record = self.peers.get(nick)
+        if record is None:
+            return f"{nick}: неизвестен"
+        mark = "сверен" if record.verified else "НЕ сверен"
+        return f"{nick}: {fingerprint(bytes.fromhex(record.key))} ({mark})"
