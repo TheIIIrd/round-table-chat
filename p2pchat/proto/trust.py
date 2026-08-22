@@ -33,9 +33,20 @@ class PeerRecord:
     key: str  # публичный ключ в hex
     verified: bool = False
     note: str = ""
+    address: str | None = None  # последний адрес, по которому связь получилась
 
     def to_json(self) -> dict:
-        return {"nick": self.nick, "key": self.key, "verified": self.verified, "note": self.note}
+        item = {"nick": self.nick, "key": self.key, "verified": self.verified, "note": self.note}
+        if self.address:
+            item["address"] = self.address
+        return item
+
+    @property
+    def endpoint(self) -> tuple[str, int] | None:
+        if not self.address:
+            return None
+        host, _, port = self.address.rpartition(":")
+        return (host, int(port)) if host and port.isdigit() else None
 
 
 @dataclass
@@ -58,6 +69,7 @@ class TrustStore:
                 key=item["key"],
                 verified=bool(item.get("verified", False)),
                 note=item.get("note", ""),
+                address=item.get("address"),
             )
             for item in raw.get("peers", [])
         }
@@ -92,6 +104,21 @@ class TrustStore:
         self.peers[nick] = record
         self.save()
         return record
+
+    def remember_address(self, public: bytes, host: str, port: int) -> None:
+        """Сохраняет адрес, по которому связь действительно получилась.
+
+        Благодаря этому ростер нужен ради ключей, а не ради адресов: сменившийся
+        IP перестаёт требовать, чтобы все переписали файл.
+        """
+        record = self.by_key(public)
+        if record is None:
+            return
+        address = f"{host}:{port}"
+        if record.address == address:
+            return
+        record.address = address
+        self.save()
 
     def mark_verified(self, nick: str) -> bool:
         record = self.peers.get(nick)

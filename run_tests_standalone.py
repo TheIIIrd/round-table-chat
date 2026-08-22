@@ -78,6 +78,9 @@ def main() -> int:
         "tests.test_files",
         "tests.test_bot",
         "tests.test_console",
+        "tests.test_connect",
+        "tests.test_games",
+        "tests.test_more_games",
         "tests.test_vectors",
     ]
     passed = skipped = 0

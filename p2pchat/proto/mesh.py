@@ -25,10 +25,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..crypto.identity import Identity, fingerprint
+from ..net.discovery import Discovery
 from ..net.link import Link, LinkClosed
 from ..net.tcp import TcpLink, serve
 from . import events as ev
 from .envelope import (
+    TYPE_ADDRESS,
     TYPE_FILE_ACCEPT,
     TYPE_FILE_CHUNK,
     TYPE_FILE_DECLINE,
@@ -52,6 +54,8 @@ from .session import Session, SessionError, build_prologue
 from .trust import TrustDecision, TrustStore
 
 RECONNECT_DELAY = 5.0
+FIRST_RECONNECT_DELAY = 0.25
+MAX_DIAL_BACKOFF = 2.0  # пока кого-то не хватает, дольше двух секунд не ждём
 MAX_NICK_LEN = 32
 
 
@@ -78,6 +82,7 @@ class Mesh:
         trust: TrustStore,
         download_dir: Path,
         listen: tuple[str, int] | None = None,
+        discover_lan: bool = False,
     ) -> None:
         self.identity = identity
         self.nickname = nickname[:MAX_NICK_LEN]
@@ -85,6 +90,7 @@ class Mesh:
         self.trust = trust
         self.download_dir = Path(download_dir)
         self.listen = listen
+        self.discover_lan = discover_lan
 
         self.events: asyncio.Queue = asyncio.Queue()
         self.clock = LamportClock()
@@ -93,6 +99,8 @@ class Mesh:
         self._outgoing: dict[bytes, OutgoingTransfer] = {}
         self._tasks: set[asyncio.Task] = set()
         self._server: asyncio.Server | None = None
+        self._discovery: Discovery | None = None
+        self._discovered: dict[bytes, tuple[str, int]] = {}
         self._running = False
 
     # --- жизненный цикл -------------------------------------------------------
@@ -120,6 +128,20 @@ class Mesh:
             await self._emit(ev.Notice(f"слушаю {host}:{actual}"))
         if self.roster is not None:
             self._spawn(self._dial_loop())
+        if self.discover_lan and self.roster is not None and self.listen is not None:
+            self._discovery = Discovery(
+                group_id=self.group_id,
+                public=self.identity.public,
+                nick=self.nickname,
+                port=self.listen[1],
+                on_peer=self._on_discovered,
+            )
+            try:
+                await self._discovery.start()
+                await self._emit(ev.Notice("обнаружение в локальной сети включено"))
+            except OSError as exc:
+                self._discovery = None
+                await self._emit(ev.Notice(f"обнаружение недоступно: {exc}"))
 
     async def stop(self) -> None:
         self._running = False
@@ -129,6 +151,9 @@ class Mesh:
             conn.reader.cancel()
             await conn.session.close()
         self._connections.clear()
+        if self._discovery is not None:
+            await self._discovery.stop()
+            self._discovery = None
         if self._server is not None:
             self._server.close()
             with contextlib.suppress(Exception):
@@ -149,22 +174,61 @@ class Mesh:
         except (LinkClosed, SessionError, Exception) as exc:  # noqa: BLE001
             await self._emit(ev.Notice(f"не удалось соединиться с {host}:{port}: {exc}"))
             return
+        self.trust.remember_address(session.remote_static, host, port)
         await self._register(session, dialed=True)
 
+    def _candidate_address(self, member: Member) -> tuple[str, int] | None:
+        """Откуда узнаём, куда звонить: три источника по убыванию свежести.
+
+        Бикон из локальной сети — самый свежий; последний удавшийся адрес
+        переживает смену IP; адрес из ростера — то, что записали руками.
+        """
+        discovered = self._discovered.get(member.public)
+        if discovered is not None:
+            return discovered
+        record = self.trust.by_key(member.public)
+        if record is not None and record.endpoint is not None:
+            return record.endpoint
+        return member.address
+
     def _should_dial(self, member: Member) -> bool:
-        if member.address is None:
+        if self._candidate_address(member) is None:
             return False
         if self.listen is None:
             return True
         return self.identity.public < member.public
 
+    def _on_discovered(self, public: bytes, host: str, port: int, nick: str) -> None:
+        if self.roster is None or self.roster.by_key(public) is None:
+            return  # бикон не из нашей группы или от неизвестного ключа
+        if self._discovered.get(public) == (host, port):
+            return
+        self._discovered[public] = (host, port)
+
     async def _dial_loop(self) -> None:
-        assert self.roster is not None
+        """Дозванивается до тех, кому положено звонить нам.
+
+        Пока кто-то из группы не на связи, пауза растёт от четверти секунды до
+        двух — пиры поднимаются вразнобой, и ждать дольше только потому, что
+        сосед запустился на мгновение позже, незачем. Когда все собрались,
+        интервал уходит на пять секунд и перестаёт шуметь.
+        """
+        if self.roster is None:
+            return
+        delay = FIRST_RECONNECT_DELAY
         while self._running:
-            for member in self.roster.others(self.identity.public):
-                if member.public in self._connections or not self._should_dial(member):
+            expected = [
+                member
+                for member in self.roster.others(self.identity.public)
+                if self._should_dial(member)
+            ]
+            for member in expected:
+                if member.public in self._connections:
                     continue
-                host, port = member.address  # type: ignore[misc]
+                candidate = self._candidate_address(member)
+                if candidate is None:
+                    continue
+                host, port = candidate
                 try:
                     link = await TcpLink.connect(host, port)
                     session = await Session.initiate(
@@ -175,8 +239,12 @@ class Mesh:
                     )
                 except Exception:  # noqa: BLE001 — пир просто ещё не поднялся
                     continue
+                self.trust.remember_address(member.public, host, port)
                 await self._register(session, dialed=True)
-            await asyncio.sleep(RECONNECT_DELAY)
+
+            everyone_here = all(member.public in self._connections for member in expected)
+            delay = RECONNECT_DELAY if everyone_here else min(delay * 2, MAX_DIAL_BACKOFF)
+            await asyncio.sleep(delay)
 
     async def _on_inbound(self, link: TcpLink) -> None:
         try:
@@ -227,6 +295,14 @@ class Mesh:
             )
         )
         await self._send_to_session(session, make(TYPE_PRESENCE, self.clock, self.nickname.encode()))
+        if self.listen is not None:
+            # Сообщаем свой порт внутри уже зашифрованного канала: тот, кто с
+            # нами хоть раз соединился, переживёт смену нашего IP. Хост не шлём —
+            # пир и так видит, откуда мы пришли, а мы своего внешнего адреса
+            # обычно не знаем (за NAT в self.listen лежит 0.0.0.0).
+            await self._send_to_session(
+                session, make(TYPE_ADDRESS, self.clock, self.listen[1].to_bytes(2, "big"))
+            )
 
     async def _authorize(self, session: Session, public: bytes) -> Member | None:
         """Решает, кого пускать, и возвращает участника с его ником."""
@@ -304,6 +380,10 @@ class Mesh:
         if envelope.type == TYPE_PRESENCE:
             return
 
+        if envelope.type == TYPE_ADDRESS:
+            self._remember_announced_address(member, session, envelope.body)
+            return
+
         try:
             await self._handle_file(member, session, envelope)
         except TransferError as exc:
@@ -362,6 +442,27 @@ class Mesh:
                 await self._emit(ev.FileFailed(member.nick, transfer.name, str(exc)))
                 return
             await self._emit(ev.FileFinished(member.nick, transfer.name, path))
+
+    def _remember_announced_address(self, member: Member, session: Session, body: bytes) -> None:
+        """Записывает адрес, по которому этот пир будет доступен впредь.
+
+        Порт пир называет сам, а хост мы берём из фактического сокета: свой
+        внешний адрес пир обычно не знает, зато мы его видим.
+        """
+        if len(body) != 2:
+            return
+        port = int.from_bytes(body, "big")
+        if not 1 <= port <= 65535:
+            return
+        observed = self._observed_host(session)
+        if observed:
+            self.trust.remember_address(member.public, observed, port)
+
+    @staticmethod
+    def _observed_host(session: Session) -> str | None:
+        description = getattr(session, "link_description", "")
+        host, _, port = description.rpartition(":")
+        return host or None
 
     # --- отправка -------------------------------------------------------------
 

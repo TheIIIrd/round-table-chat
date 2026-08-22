@@ -20,7 +20,8 @@ import sys
 from pathlib import Path
 
 from .bot.runner import Bot
-from .crypto.identity import Identity, KeyFileError
+from .crypto.identity import Identity, KeyFileError, fingerprint
+from .proto import invite as invites
 from .proto.mesh import Mesh
 from .proto.roster import Member, Roster, RosterError
 from .proto.trust import TrustStore
@@ -49,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     keygen = sub.add_parser("keygen", help="создать долговременный ключ")
     keygen.add_argument("--nick", default=getpass.getuser(), help="ник по умолчанию")
+    keygen.add_argument(
+        "--key-from-env",
+        action="store_true",
+        help="взять пассфразу из P2PCHAT_PASSPHRASE (для скриптов и локальных стендов)",
+    )
     keygen.set_defaults(handler=cmd_keygen)
 
     whoami = sub.add_parser("whoami", help="показать свой ключ и отпечаток")
@@ -68,8 +74,17 @@ def build_parser() -> argparse.ArgumentParser:
     r_add.add_argument("--bot", action="store_true", help="пометить как бота")
     r_add.set_defaults(handler=cmd_roster_add)
 
+    r_invite = roster_sub.add_parser("add-invite", help="добавить участника из приглашения")
+    r_invite.add_argument("invite", help="строка p2pchat:… или p2pchat-group:…")
+    r_invite.set_defaults(handler=cmd_roster_add_invite)
+
     r_show = roster_sub.add_parser("show", help="показать состав и идентификатор группы")
     r_show.set_defaults(handler=cmd_roster_show)
+
+    invite = sub.add_parser("invite", help="показать свою строку-приглашение")
+    invite.add_argument("--address", help="host:port, под которым вас видно снаружи")
+    invite.add_argument("--group", action="store_true", help="приглашение со всем ростером")
+    invite.set_defaults(handler=cmd_invite)
 
     chat = sub.add_parser("chat", help="запустить чат")
     chat.add_argument("--nick", help="ник (по умолчанию из ключа)")
@@ -85,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     bot = sub.add_parser("bot", help="запустить бота")
     bot.add_argument("--nick", default="dice", help="ник бота")
     bot.add_argument("--listen", default="0.0.0.0:9334")
+    bot.add_argument("--discover", choices=["lan", "off"], default="off")
     bot.add_argument(
         "--key-from-env",
         action="store_true",
@@ -106,7 +122,12 @@ def cmd_keygen(args) -> int:
         print(f"Ключ уже существует: {path}", file=sys.stderr)
         return 1
 
-    passphrase = _ask_new_passphrase()
+    if args.key_from_env:
+        passphrase = os.environ.get("P2PCHAT_PASSPHRASE", "")
+        if len(passphrase) < 8:
+            raise ValueError("P2PCHAT_PASSPHRASE пуста или короче восьми символов")
+    else:
+        passphrase = _ask_new_passphrase()
     identity = Identity.generate(args.nick)
     identity.save(path, passphrase)
     (home / "nick").write_text(args.nick, encoding="utf-8")
@@ -172,6 +193,62 @@ def cmd_roster_show(args) -> int:
     return 0
 
 
+def cmd_invite(args) -> int:
+    identity = _load_identity(args)
+    nick = _default_nick(args)
+
+    if args.group:
+        roster = Roster.load(_roster_path(args))
+        print(invites.encode_group(roster))
+        print(f"\nГруппа «{roster.name}», участников: {len(roster.members)}")
+        print("Принять: p2pchat roster add-invite <строка>")
+        return 0
+
+    host, port = (_split_address(args.address) if args.address else (None, None))
+    if host is None:
+        roster_file = _roster_path(args)
+        if roster_file.exists():
+            member = Roster.load(roster_file).by_key(identity.public)
+            if member and member.address:
+                host, port = member.address
+    member = Member(nick=nick, public=identity.public, host=host, port=port)
+
+    print(invites.encode_peer(member))
+    print(f"\nОтпечаток: {identity.fingerprint()}")
+    if host is None:
+        print("Адрес не указан — добавьте --address host:port, иначе к вам не дозвонятся.")
+    print("Продиктуйте отпечаток голосом: строку могли подменить по дороге.")
+    return 0
+
+
+def cmd_roster_add_invite(args) -> int:
+    path = _roster_path(args)
+    text = args.invite.strip()
+
+    if invites.looks_like_group(text):
+        roster = invites.decode_group(text)
+        roster.save(path)
+        print(f"Ростер принят: группа «{roster.name}», участников {len(roster.members)}")
+        print(f"Идентификатор группы: {roster.group_id.hex()}")
+        for member in roster.members:
+            print(f"  {member.nick}: {fingerprint(member.public)}")
+        print("\nСверьте отпечатки с людьми напрямую — приглашение могли подменить.")
+        return 0
+
+    parsed = invites.decode_peer(text)
+    raw = json.loads(path.read_text()) if path.exists() else {"name": "group", "members": []}
+    raw.setdefault("members", [])
+    raw["members"].append(parsed.member.to_json())
+
+    roster = Roster.from_json(raw)  # проверка до записи
+    roster.save(path)
+    print(f"Добавлен {parsed.member.nick}")
+    print(f"Отпечаток: {parsed.fingerprint}")
+    print(f"Новый идентификатор группы: {roster.group_id.hex()}")
+    print("Раздайте обновлённый ростер всем: p2pchat invite --group")
+    return 0
+
+
 def cmd_chat(args) -> int:
     identity = _load_identity(args, from_env=args.key_from_env)
     nick = args.nick or _default_nick(args)
@@ -192,6 +269,7 @@ def cmd_chat(args) -> int:
         trust=trust,
         download_dir=args.home / "downloads",
         listen=listen,
+        discover_lan=args.discover == "lan",
     )
     console = build_console(mesh, trust)
 
@@ -223,6 +301,7 @@ def cmd_bot(args) -> int:
         roster=roster,
         trust_path=args.home / "bot_known_peers.json",
         listen=_parse_listen(args.listen),
+        discover_lan=args.discover == "lan",
     )
     try:
         asyncio.run(bot.run())

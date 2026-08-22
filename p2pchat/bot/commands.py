@@ -63,4 +63,8 @@ def choose(ctx: Context, raw: str) -> str:
 
 @registry.command("help", help="список команд")
 def help_command(ctx: Context) -> str:
-    return "Команды бота:\n" + "\n".join(registry.help_lines())
+    return (
+        "Команды бота:\n"
+        + "\n".join(registry.help_lines())
+        + "\nИгры: !game — список, !join, !start, !leave, !stop, !who"
+    )

@@ -145,6 +145,11 @@ class Session:
         return self._closed
 
     @property
+    def link_description(self) -> str:
+        """Как выглядит канал: для TCP — фактический адрес пира."""
+        return self._link.description
+
+    @property
     def rekey_count(self) -> int:
         """Сколько раз ключи сессии сменились свежим DH."""
         return self._rekey_count

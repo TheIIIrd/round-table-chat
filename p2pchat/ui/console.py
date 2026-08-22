@@ -29,6 +29,7 @@ BANNER = """p2pchat — консольный P2P-чат
 """
 
 HELP = """Команды:
+  /w <ник> <текст>     сказать лично (ночные ходы в играх — только так)
   /peers               кто на связи
   /fingerprint         мой отпечаток
   /verify <ник>        отметить, что SAS сверен голосом
@@ -105,6 +106,15 @@ class Console:
 
         if name == "help":
             self._write(HELP)
+        elif name in ("w", "msg", "tell"):
+            nick, _, body = rest.partition(" ")
+            body = body.strip()
+            if not nick or not body:
+                self._write("* формат: /w <ник> <текст>")
+            elif await self.mesh.send_text(nick, body):
+                self._write(f"-> {nick}: {body}")
+            else:
+                self._write(f"* {nick} не на связи")
         elif name == "peers":
             peers = self.mesh.peers
             self._write("На связи: " + (", ".join(peers) if peers else "никого"))
