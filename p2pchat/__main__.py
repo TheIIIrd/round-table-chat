@@ -92,11 +92,15 @@ def build_parser() -> argparse.ArgumentParser:
     r_add.add_argument("--bot", action="store_true", help="пометить как бота")
     r_add.set_defaults(handler=cmd_roster_add)
 
-    r_invite = roster_sub.add_parser("add-invite", parents=[common], help="добавить участника из приглашения")
+    r_invite = roster_sub.add_parser(
+        "add-invite", parents=[common], help="добавить участника из приглашения"
+    )
     r_invite.add_argument("invite", help="строка p2pchat:… или p2pchat-group:…")
     r_invite.set_defaults(handler=cmd_roster_add_invite)
 
-    r_show = roster_sub.add_parser("show", parents=[common], help="показать состав и идентификатор группы")
+    r_show = roster_sub.add_parser(
+        "show", parents=[common], help="показать состав и идентификатор группы"
+    )
     r_show.set_defaults(handler=cmd_roster_show)
 
     colors = sub.add_parser(
@@ -341,7 +345,7 @@ def cmd_chat(args) -> int:
         if args.direct:
             host, port = _split_address(args.direct)
             asyncio.get_running_loop().call_later(
-                0.1, lambda: asyncio.ensure_future(mesh.connect_to(host, port))
+                0.1, lambda: asyncio.ensure_future(mesh.network.connect_to(host, port))
             )
         await console.run()
 

@@ -172,7 +172,7 @@ class Console:
         self._write(HELP)
 
     async def _cmd_peers(self, _rest: str) -> None:
-        peers = self.mesh.peers
+        peers = self.mesh.network.peers
         self._write("На связи: " + (", ".join(peers) if peers else "никого"))
 
     async def _cmd_fingerprint(self, _rest: str) -> None:
@@ -195,7 +195,7 @@ class Console:
         if not host or not port.isdigit():
             self._write("· формат: /connect host:port")
             return
-        await self.mesh.connect_to(host, int(port))
+        await self.mesh.network.connect_to(host, int(port))
 
     async def _cmd_send(self, rest: str) -> None:
         nick, _, path = rest.partition(" ")

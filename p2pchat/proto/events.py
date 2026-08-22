@@ -55,7 +55,6 @@ class TextMessage(Event):
     nick: str
     public: bytes
     text: str
-    lamport: int
     is_bot: bool = False
 
     def render(self) -> str:
@@ -112,7 +111,10 @@ class FileFailed(Event):
     reason: str
 
     def render(self) -> str:
-        return f"✗ передача «{sanitize(self.name)}» ({self.nick}) не удалась: {self.reason}"
+        # Ник пустой, когда передача сорвалась по нашей стороне — пустые скобки
+        # в такой строке выглядят как недоделка.
+        who = f" ({self.nick})" if self.nick else ""
+        return f"✗ передача «{sanitize(self.name)}»{who} не удалась: {sanitize(self.reason)}"
 
 
 @dataclass

@@ -55,6 +55,11 @@ class Durak:
         self.order: list[str] = []
         self.out: list[str] = []
         self.table: list[tuple[Card, Card | None]] = []
+        # Отбой: карты, вышедшие из игры. Раньше их просто выбрасывали, и колода
+        # переставала сходиться — 36 карт превращались в 34, потом в 30. На игру
+        # это не влияло, но проверить целостность было нечем, а игрокам в
+        # концовке важно знать, сколько уже вышло.
+        self.discarded: list[Card] = []
         self.attacker = 0
         self.defender = 1
         self.passed: set[str] = set()
@@ -114,6 +119,11 @@ class Durak:
         if self.finished or player not in self.hands or player in self.out:
             return []
         self.out.append(player)
+        # Карты ушедшего уходят в отбой. Иначе они остаются «на руках» у того,
+        # кого уже нет за столом: колода сходится по счёту, но состояние врёт —
+        # выбывший держит карты, которых никто не может сыграть.
+        self.discarded.extend(self.hands[player])
+        self.hands[player] = []
         remaining = [p for p in self.order if p not in self.out]
         if len(remaining) <= 1:
             self.finished = True
@@ -250,6 +260,10 @@ class Durak:
 
     def _reset_round(self, *, taken: bool) -> list[Action]:
         defender = self._defender()
+        if not taken:
+            self.discarded.extend(
+                card for pair in self.table for card in pair if card is not None
+            )
         self.table = []
         self.passed = set()
 
@@ -285,10 +299,17 @@ class Durak:
         return actions
 
     def _refill(self) -> None:
-        order = [self._attacker()] + [
-            p for p in self._active() if p not in (self._attacker(), self._defender())
-        ]
-        if self._defender() in self._active():
+        """Добор до шести: сначала атакующий, потом остальные, защищающийся последним.
+
+        Порядок берётся по ролям ЗАВЕРШИВШЕГОСЯ круга — так правильно. Но роли
+        нужно фильтровать по составу: прежний атакующий мог только что выбыть
+        или уйти, и без проверки добор возвращал карты тому, кого за столом уже
+        нет.
+        """
+        active = self._active()
+        order = [player for player in (self._attacker(),) if player in active]
+        order += [p for p in active if p not in (self._attacker(), self._defender())]
+        if self._defender() in active:
             order.append(self._defender())
         for player in order:
             while self.deck and len(self.hands[player]) < HAND_SIZE:
@@ -315,7 +336,9 @@ class Durak:
         return panel(
             render_hand(sort_hand(hand, self.trump)),
             title=f"Ваша рука ({len(hand)})",
-            footer=f"козырь {self.trump} · колода {len(self.deck)}",
+            footer=(
+                f"козырь {self.trump} · колода {len(self.deck)} · отбой {len(self.discarded)}"
+            ),
         )
 
     def _active(self) -> list[str]:

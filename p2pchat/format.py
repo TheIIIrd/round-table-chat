@@ -24,11 +24,18 @@ ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 MAX_LINE = 200
 MAX_LINES = 40
+TAB_WIDTH = 4
 
 
 def sanitize(text: str) -> str:
-    """Убирает из чужого текста всё, чем можно управлять терминалом."""
+    """Убирает из чужого текста всё, чем можно управлять терминалом.
+
+    Табуляция заменяется пробелами: она не опасна, но её ширину нельзя
+    посчитать заранее — терминал растянет её до следующей позиции табуляции, и
+    рамка вокруг такого текста разъедется, хотя по нашим меркам будет ровной.
+    """
     cleaned = ANSI.sub("", text)
+    cleaned = cleaned.replace("\t", " " * TAB_WIDTH)
     cleaned = CONTROL.sub("", cleaned)
     lines = [line[:MAX_LINE] for line in cleaned.split("\n")[:MAX_LINES]]
     return "\n".join(lines)

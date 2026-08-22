@@ -152,3 +152,23 @@ def test_existing_name_does_not_overwrite(tmp_path):
 
     assert result.name == "data (1).bin"
     assert (outbox / "data.bin").read_bytes() == "старое содержимое".encode()
+
+
+def test_chunk_fits_the_wire_with_room_to_spare():
+    """Куски файла обязаны помещаться в кадр — и это не должно держаться на удаче.
+
+    Величины живут в четырёх разных модулях: размер кадра, потолок полезной
+    нагрузки сессии, заголовок конверта и размер куска. Правка любой из них без
+    оглядки на остальные даёт «сообщение длиннее допустимого» уже во время
+    передачи, а не при запуске.
+    """
+    from p2pchat.proto.envelope import HEADER_LEN
+    from p2pchat.proto.files import CHUNK_SIZE, HASH_LEN, TRANSFER_ID_LEN
+    from p2pchat.proto.session import MAX_PLAINTEXT
+
+    chunk_message = HEADER_LEN + TRANSFER_ID_LEN + 4 + CHUNK_SIZE
+    assert chunk_message <= MAX_PLAINTEXT
+
+    # Предложение файла тоже едет одним сообщением: заголовок плюс длинное имя.
+    offer_message = HEADER_LEN + TRANSFER_ID_LEN + 8 + HASH_LEN + 120 * 4
+    assert offer_message <= MAX_PLAINTEXT

@@ -187,6 +187,10 @@ class IncomingTransfer:
             directory=Path(directory),
         )
 
+    @property
+    def is_active(self) -> bool:
+        return self.state is TransferState.ACTIVE
+
     def accept(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         self._temp = self.directory / f".{self.transfer_id.hex()}.part"

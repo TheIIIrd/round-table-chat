@@ -26,10 +26,7 @@ CATALOG: dict[str, type] = {
 
 
 def build_host(rng: Random | None = None) -> GameHost:
-    return GameHost(
-        catalog={name: (lambda r, cls=cls: cls(r)) for name, cls in CATALOG.items()},
-        rng=rng or Random(secrets.randbits(64)),
-    )
+    return GameHost(catalog=dict(CATALOG), rng=rng or Random(secrets.randbits(64)))
 
 
 __all__ = [

@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Запуск тестов без pytest.
+"""Запуск тестов без pytest — запасной вариант, не второй способ.
 
-Основной способ — ``python -m pytest tests``. Этот файл нужен там, где pytest
-недоступен (изолированная машина, отсутствие сети). Он подменяет минимальный
-набор API pytest и прогоняет те же самые тестовые функции.
+Основной способ один: ``python -m pytest tests``. Этот файл существует для
+машин без сети, где pytest неоткуда взять, и подменяет минимальный набор его
+API.
+
+Оговорка, которую важно держать в голове: подделка чужой библиотеки может
+разойтись с оригиналом. Один раз уже разошлась — здесь не поддерживался
+``pytest.raises(...) as``, и тест падал не по той причине, по которой падал бы
+у pytest. Поэтому если результаты двух способов расходятся, прав pytest.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ import types
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
@@ -169,6 +174,7 @@ def main() -> int:
         "tests.test_games",
         "tests.test_more_games",
         "tests.test_cli",
+        "tests.test_properties",
         "tests.test_vectors",
     ]
     passed = skipped = 0

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from p2pchat.bot import commands as bot_commands
 from p2pchat.bot.registry import Context, Registry, TokenBucket
 from p2pchat.bot.runner import Bot
@@ -18,7 +16,7 @@ from p2pchat.crypto.identity import Identity
 from p2pchat.proto import events as ev
 from p2pchat.proto.roster import Member, Roster
 from p2pchat.proto.trust import TrustStore
-from tests.test_mesh import _run, free_ports, wait_connected, wait_for
+from tests.conftest import free_ports, run_async, wait_connected, wait_for
 
 CTX = Context(nick="alice", public=b"\x01" * 32)
 
@@ -165,7 +163,7 @@ def test_bot_answers_in_group():
             bot_task.cancel()
             await mesh.stop()
 
-    _run(scenario)
+    run_async(scenario)
 
 
 def test_bot_declines_files():
@@ -210,7 +208,7 @@ def test_bot_declines_files():
             bot_task.cancel()
             await mesh.stop()
 
-    _run(scenario)
+    run_async(scenario)
 
 
 def test_bot_ignores_other_bots():
@@ -234,9 +232,9 @@ def test_bot_ignores_other_bots():
 
         await bot._handle(
             ev.TextMessage(
-                nick="other", public=b"\x03" * 32, text="!roll d20", lamport=1, is_bot=True
+                nick="other", public=b"\x03" * 32, text="!roll d20", is_bot=True
             )
         )
         assert sent == []
 
-    _run(scenario)
+    run_async(scenario)

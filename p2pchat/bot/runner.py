@@ -53,7 +53,9 @@ class Bot:
     ) -> None:
         self.commands = commands or registry
         self.host = host or build_host()
-        self._buckets: dict[str, TokenBucket] = {}
+        # Ключ — публичный ключ, а не ник: ник это ярлык, который в режиме
+        # один на один выбирает сам собеседник.
+        self._buckets: dict[bytes, TokenBucket] = {}
         self.mesh = Mesh(
             identity,
             nickname=nickname,
@@ -67,7 +69,7 @@ class Bot:
 
     async def run(self) -> None:
         await self.mesh.start()
-        log.info("бот %s запущен, команды: %s", self.mesh.nickname, self.commands.names)
+        log.info("бот %s запущен, команды: %s", self.mesh.network.nickname, self.commands.names)
         ticker = asyncio.create_task(self._tick_loop())
         try:
             while True:
@@ -122,7 +124,7 @@ class Bot:
         if not self.host.owns(verb):
             return False
 
-        bucket = self._buckets.setdefault(event.nick, TokenBucket())
+        bucket = self._buckets.setdefault(event.public, TokenBucket())
         if not bucket.take():
             return True  # флуд гасим молча: ответ на флуд — тоже флуд
 

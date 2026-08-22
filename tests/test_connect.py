@@ -122,7 +122,7 @@ def test_trust_remembers_working_address():
         path = Path(tmp) / "known.json"
         trust = TrustStore.load(path)
         peer = Identity.generate().public
-        trust.remember("bob", peer)
+        trust.remember(peer, "bob")
         trust.remember_address(peer, "198.51.100.7", 9333)
 
         reloaded = TrustStore.load(path)
@@ -154,14 +154,14 @@ def test_mesh_prefers_fresher_address():
             listen=None,
         )
 
-        assert mesh._candidate_address(member) == ("roster.example", 9333)
+        assert mesh.network._candidate_address(member) == ("roster.example", 9333)
 
-        trust.remember("peer", peer.public)
+        trust.remember(peer.public, "peer")
         trust.remember_address(peer.public, "10.0.0.5", 9333)
-        assert mesh._candidate_address(member) == ("10.0.0.5", 9333)
+        assert mesh.network._candidate_address(member) == ("10.0.0.5", 9333)
 
-        mesh._on_discovered(peer.public, "192.168.1.20", 9333, "peer")
-        assert mesh._candidate_address(member) == ("192.168.1.20", 9333)
+        mesh.network._on_discovered(peer.public, "192.168.1.20", 9333, "peer")
+        assert mesh.network._candidate_address(member) == ("192.168.1.20", 9333)
 
 
 # --- обнаружение --------------------------------------------------------------
@@ -221,8 +221,8 @@ def test_mesh_ignores_beacon_from_outside_roster():
             download_dir=Path(tmp) / "dl",
             listen=None,
         )
-        mesh._on_discovered(Identity.generate().public, "10.0.0.9", 9333, "чужак")
-        assert mesh._discovered == {}
+        mesh.network._on_discovered(Identity.generate().public, "10.0.0.9", 9333, "чужак")
+        assert mesh.network._discovered == {}
 
 
 def test_discovery_reports_when_it_cannot_send():
@@ -306,6 +306,7 @@ def test_discovery_over_real_multicast():
 def test_announced_port_is_remembered_with_observed_host():
     """Порт называет пир, хост берём из сокета — свой внешний адрес он не знает."""
     from p2pchat.proto.mesh import Mesh
+    from p2pchat.proto.network import Connection
 
     class FakeSession:
         link_description = "203.0.113.55:41234"  # эфемерный порт входящего
@@ -314,7 +315,7 @@ def test_announced_port_is_remembered_with_observed_host():
         me, peer = Identity.generate("me"), Identity.generate("peer")
         member = Member("peer", peer.public)
         trust = TrustStore.load(Path(tmp) / "known.json")
-        trust.remember("peer", peer.public)
+        trust.remember(peer.public, "peer")
         mesh = Mesh(
             me,
             nickname="me",
@@ -323,11 +324,49 @@ def test_announced_port_is_remembered_with_observed_host():
             download_dir=Path(tmp) / "dl",
             listen=None,
         )
+        network = mesh.network
+        network._connections[peer.public] = Connection(
+            member=member, session=FakeSession(), reader=None
+        )
 
-        mesh._remember_announced_address(member, FakeSession(), (9333).to_bytes(2, "big"))
+        network.remember_peer_port(member, 9333)
         assert trust.by_key(peer.public).endpoint == ("203.0.113.55", 9333)
 
         # Мусор не должен ничего портить.
-        for bad in (b"", b"\x00\x00", b"too long"):
-            mesh._remember_announced_address(member, FakeSession(), bad)
+        for bad in (0, 70000, -1):
+            network.remember_peer_port(member, bad)
         assert trust.by_key(peer.public).endpoint == ("203.0.113.55", 9333)
+
+
+def test_trust_is_keyed_by_public_key_not_nick():
+    """Личность — это ключ; ник лишь ярлык, который можно сменить и присвоить."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TrustStore.load(Path(tmp) / "known.json")
+        bob, stranger = Identity.generate().public, Identity.generate().public
+
+        assert store.check(bob, "bob").value == "new"
+        store.remember(bob, "bob")
+        store.mark_verified("bob")
+
+        # Смена ника не стирает отметку о сверке: ключ тот же.
+        assert store.check(bob, "боб").value == "verified"
+
+        # Чужак под знакомым именем отвергается, но записи не портит.
+        assert store.check(stranger, "bob").value == "nick_taken"
+        assert store.by_key(bob).verified is True
+
+        # А тот же чужак под своим именем — просто новый.
+        assert store.check(stranger, "mallory").value == "new"
+
+
+def test_forget_removes_by_nick_and_survives_reload():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "known.json"
+        store = TrustStore.load(path)
+        key = Identity.generate().public
+        store.remember(key, "bob", verified=True)
+
+        assert TrustStore.load(path).by_key(key).verified is True
+        assert store.forget("bob") is True
+        assert TrustStore.load(path).by_key(key) is None
+        assert store.forget("bob") is False

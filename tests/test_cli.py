@@ -313,3 +313,19 @@ def test_common_flags_work_before_and_after_subcommand():
     assert str(parser.parse_args(["--home", "/a", "whoami"]).home) == "/a"
     assert str(parser.parse_args(["whoami", "--home", "/b"]).home) == "/b"
     assert str(parser.parse_args(["roster", "show", "--home", "/c"]).home) == "/c"
+
+
+def test_no_duplicate_test_definitions():
+    """Второе определение с тем же именем молча перекрывает первое.
+
+    Так уже случалось: переписанные тесты остались в файле ниже старых версий,
+    и запускались именно старые — падая по причинам, которых в новых нет.
+    """
+    import re as _re
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).parent
+    for path in sorted(root.glob("*.py")):
+        names = _re.findall(r"^(?:async )?def (\w+)", path.read_text(), _re.MULTILINE)
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        assert not duplicates, f"{path.name}: повторные определения {duplicates}"
