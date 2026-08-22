@@ -135,6 +135,7 @@ class Mesh:
                 nick=self.nickname,
                 port=self.listen[1],
                 on_peer=self._on_discovered,
+                on_error=self._on_discovery_error,
             )
             try:
                 await self._discovery.start()
@@ -197,6 +198,15 @@ class Mesh:
         if self.listen is None:
             return True
         return self.identity.public < member.public
+
+    def _on_discovery_error(self, message: str) -> None:
+        """Молчащее обнаружение хуже отсутствующего — говорим вслух один раз."""
+        self.events.put_nowait(
+            ev.Notice(
+                f"обнаружение в сети не работает ({message}); "
+                "укажите адреса в ростере или подключитесь через /connect"
+            )
+        )
 
     def _on_discovered(self, public: bytes, host: str, port: int, nick: str) -> None:
         if self.roster is None or self.roster.by_key(public) is None:

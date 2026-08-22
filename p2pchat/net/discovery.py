@@ -80,6 +80,7 @@ class Beacon:
 
 
 OnPeer = Callable[[bytes, str, int, str], None]
+OnError = Callable[[str], None]
 
 
 class _Protocol(asyncio.DatagramProtocol):
@@ -104,17 +105,23 @@ class Discovery:
         nick: str,
         port: int,
         on_peer: OnPeer,
+        on_error: OnError | None = None,
         multicast_group: str = MULTICAST_GROUP,
         multicast_port: int = MULTICAST_PORT,
         interval: float = BEACON_INTERVAL,
     ) -> None:
         self.beacon = Beacon(group_id=group_id, public=public, port=port, nick=nick)
         self.on_peer = on_peer
+        self.on_error = on_error
         self.multicast_group = multicast_group
         self.multicast_port = multicast_port
         self.interval = interval
         self._transport: asyncio.DatagramTransport | None = None
         self._task: asyncio.Task | None = None
+        self._socket: socket.socket | None = None
+        self._loopback_tried = False
+        self._reported = False
+        self.sent = 0
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -132,6 +139,7 @@ class Discovery:
 
         transport, _ = await loop.create_datagram_endpoint(lambda: _Protocol(self), sock=sock)
         self._transport = transport  # type: ignore[assignment]
+        self._socket = sock
         self._task = asyncio.create_task(self._announce_loop())
 
     async def stop(self) -> None:
@@ -157,7 +165,40 @@ class Discovery:
     async def _announce_loop(self) -> None:
         payload = self.beacon.encode()
         while True:
-            if self._transport is not None:
-                with contextlib.suppress(OSError):
-                    self._transport.sendto(payload, (self.multicast_group, self.multicast_port))
+            self._announce(payload)
             await asyncio.sleep(self.interval)
+
+    def _announce(self, payload: bytes) -> None:
+        """Шлёт бикон, при неудаче один раз пробует через loopback.
+
+        В окружениях без маршрута для 239.0.0.0/8 (контейнеры, некоторые
+        конфигурации Nix и firewall) отправка падает с ``OSError``. Раньше
+        ошибка молча проглатывалась, и обнаружение делало вид, что работает.
+        Теперь мы пробуем явно привязать мультикаст к loopback — этого хватает
+        для нескольких клиентов на одной машине, — а если и это не вышло,
+        сообщаем наверх один раз, вместо того чтобы тихо ничего не делать.
+        """
+        if self._transport is None:
+            return
+        try:
+            self._transport.sendto(payload, (self.multicast_group, self.multicast_port))
+            self.sent += 1
+            return
+        except OSError as exc:
+            first_error = exc
+
+        if not self._loopback_tried and self._socket is not None:
+            self._loopback_tried = True
+            try:
+                self._socket.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1")
+                )
+                self._transport.sendto(payload, (self.multicast_group, self.multicast_port))
+                self.sent += 1
+                return
+            except OSError as exc:
+                first_error = exc
+
+        if not self._reported and self.on_error is not None:
+            self._reported = True
+            self.on_error(str(first_error))

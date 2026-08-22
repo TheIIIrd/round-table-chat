@@ -22,6 +22,7 @@ from pathlib import Path
 from .bot.runner import Bot
 from .crypto.identity import Identity, KeyFileError, fingerprint
 from .proto import invite as invites
+from .proto.invite import InviteError
 from .proto.mesh import Mesh
 from .proto.roster import Member, Roster, RosterError
 from .proto.trust import TrustStore
@@ -36,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     try:
         return args.handler(args)
-    except (KeyFileError, RosterError, ValueError) as exc:
+    except (KeyFileError, RosterError, InviteError, ValueError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -90,6 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--nick", help="ник (по умолчанию из ключа)")
     chat.add_argument("--listen", default="0.0.0.0:9333", help="адрес для входящих, или none")
     chat.add_argument("--direct", help="host:port собеседника для режима один на один")
+    chat.add_argument(
+        "--discover",
+        choices=["lan", "off"],
+        default="off",
+        help="lan — искать участников в локальной сети мультикастом",
+    )
     chat.add_argument(
         "--key-from-env",
         action="store_true",
