@@ -43,7 +43,7 @@ python -m p2pchat invite --address 203.0.113.10:9333
 
 ```bash
 python -m p2pchat roster new друзья
-python -m p2pchat roster add-invite p2pchat:KAZFASIB…      # и так каждого
+python -m p2pchat roster add-invite p2pchat:KAZFASIB…       # и так каждого
 python -m p2pchat invite --group                            # отдать всем
 python -m p2pchat roster add-invite p2pchat-group:KAZFARYB… # принять у себя
 ```
