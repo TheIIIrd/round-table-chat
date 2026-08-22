@@ -1,5 +1,10 @@
 """Тесты защищённой сессии поверх Link."""
 
+# Тест проверяет в том числе внутреннее состояние — иначе половину
+# свойств безопасности не подтвердить. Импорты внутри функций держат
+# сценарии самодостаточными.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import asyncio
@@ -11,10 +16,18 @@ from p2pchat.crypto.identity import Identity
 from p2pchat.net.link import LinkClosed, MemoryLink
 from p2pchat.proto import session as sess
 from tests.helpers import TamperLink, drop_all, flip_byte, replace_kind
-from p2pchat.proto.session import KIND_DATA, KIND_REKEY_REQUEST, Session, SessionError, build_prologue
+from p2pchat.proto.session import (
+    KIND_DATA,
+    KIND_REKEY_REQUEST,
+    Session,
+    SessionError,
+    build_prologue,
+)
 
 
-async def make_pair(prologue_a: bytes = b"", prologue_b: bytes = b"", payloads=(b"a", b"b")):
+async def make_pair(
+    prologue_a: bytes = b"", prologue_b: bytes = b"", payloads=(b"a", b"b")
+):
     raw_a, link_b = MemoryLink.pair()
     link_a = TamperLink(raw_a)
     a, b = await asyncio.gather(
@@ -46,8 +59,12 @@ def test_prologue_mismatch_fails_handshake():
         link_a, link_b = MemoryLink.pair()
         with pytest.raises(p.InvalidTag):
             await asyncio.gather(
-                Session.initiate(link_a, Identity.generate(), prologue=build_prologue(group_id=b"A")),
-                Session.accept(link_b, Identity.generate(), prologue=build_prologue(group_id=b"B")),
+                Session.initiate(
+                    link_a, Identity.generate(), prologue=build_prologue(group_id=b"A")
+                ),
+                Session.accept(
+                    link_b, Identity.generate(), prologue=build_prologue(group_id=b"B")
+                ),
             )
 
     asyncio.run(scenario())

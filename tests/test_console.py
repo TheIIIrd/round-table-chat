@@ -5,6 +5,11 @@
 человеком, поэтому «забыть напомнить» здесь дороже, чем ошибка в разборе.
 """
 
+# Тест проверяет в том числе внутреннее состояние — иначе половину
+# свойств безопасности не подтвердить. Импорты внутри функций держат
+# сценарии самодостаточными.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import asyncio
@@ -198,6 +203,12 @@ def test_bot_lines_are_marked_even_without_color():
     with tempfile.TemporaryDirectory() as tmp:
         console, _, _ = build(Path(tmp))
         line = console._decorate(
-            ev.TextMessage(nick="dice", public=b"\x03" * 32, text="строка\nвторая", lamport=1, is_bot=True)
+            ev.TextMessage(
+                nick="dice",
+                public=b"\x03" * 32,
+                text="строка\nвторая",
+                lamport=1,
+                is_bot=True,
+            )
         )
         assert line.split("\n") == ["┃ строка", "┃ вторая"]

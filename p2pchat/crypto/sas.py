@@ -16,6 +16,8 @@ Noise_XX доказывает, что у собеседника есть при�
 
 from __future__ import annotations
 
+import hmac
+
 from . import primitives as p
 
 GROUPS = 6
@@ -43,8 +45,6 @@ def sas_matches(local: str, spoken: str) -> bool:
     сравнивать секретоподобные строки через ``compare_digest`` полезнее, чем
     рассуждения о том, где именно утечка по времени опасна.
     """
-    import hmac
-
     return hmac.compare_digest(_normalize(local), _normalize(spoken))
 
 

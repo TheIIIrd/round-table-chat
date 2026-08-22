@@ -18,17 +18,21 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import socket
 import subprocess
 import sys
 from pathlib import Path
 
+# Скрипт запускают из корня репозитория как `python tools/local_testbed.py`,
+# поэтому пакет надо найти до импорта — отсюда порядок, непривычный линтеру.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# pylint: disable=wrong-import-position
 from p2pchat.crypto.identity import Identity  # noqa: E402
 from p2pchat.proto.roster import Roster  # noqa: E402
+
+# pylint: enable=wrong-import-position
 
 PASSPHRASE = "testbed-passphrase"
 DEFAULT_ROOT = Path("/tmp/p2pchat-testbed")

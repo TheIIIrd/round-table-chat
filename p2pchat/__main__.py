@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="p2pchat", description="Безопасный консольный P2P-чат")
-    parser.add_argument("--home", type=Path, default=DEFAULT_HOME, help="каталог с ключом и данными")
+    parser.add_argument(
+        "--home", type=Path, default=DEFAULT_HOME, help="каталог с ключом и данными"
+    )
     parser.add_argument(
         "--no-color",
         action="store_true",

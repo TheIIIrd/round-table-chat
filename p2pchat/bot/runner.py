@@ -72,9 +72,9 @@ class Bot:
         try:
             while True:
                 await self._handle(await self.mesh.events.get())
-        except asyncio.CancelledError:
-            raise
         finally:
+            # finally отрабатывает и при отмене задачи, поэтому отдельная ветка
+            # except CancelledError с одним лишь raise была бы лишней.
             ticker.cancel()
             await self.mesh.stop()
 

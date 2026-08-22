@@ -145,7 +145,11 @@ class Console:
                 await self.mesh.broadcast(line)
 
     async def _command(self, line: str) -> bool:
-        """Возвращает False, если пора выходить."""
+        """Выполняет команду. Возвращает False, если пора выходить.
+
+        Разбор устроен таблицей, а не лестницей из elif: добавить команду —
+        значит дописать одну строку в COMMANDS, а не ветку в растущий метод.
+        """
         name, _, rest = line[1:].partition(" ")
         name = name.lower()
         name = ALIASES.get(name, name)
@@ -154,51 +158,82 @@ class Console:
         if name in ("quit", "exit"):
             return False
 
-        if name == "help":
-            self._write(HELP)
-        elif name in ("w", "msg", "tell"):
-            nick, _, body = rest.partition(" ")
-            body = body.strip()
-            if not nick or not body:
-                self._write("* формат: /w <ник> <текст>")
-            elif await self.mesh.send_text(nick, body):
-                self._write(self.palette.dim(f"→ {nick}: {body}"))
-            else:
-                self._write(f"* {nick} не на связи")
-        elif name == "peers":
-            peers = self.mesh.peers
-            self._write("На связи: " + (", ".join(peers) if peers else "никого"))
-        elif name == "fingerprint":
-            self._write(f"Мой отпечаток: {self.mesh.identity.fingerprint()}")
-        elif name == "verify":
-            if self.trust.mark_verified(rest):
-                self._write(self.palette.green(f"✓ {rest} отмечен как сверенный"))
-            else:
-                self._write(self.palette.red(f"✗ {rest} не найден среди известных"))
-        elif name == "forget":
-            if self.trust.forget(rest):
-                self._write(f"* ключ {rest} забыт; при следующем соединении запомню новый")
-            else:
-                self._write(f"* {rest} и так неизвестен")
-        elif name == "connect":
-            host, _, port = rest.rpartition(":")
-            if not host or not port.isdigit():
-                self._write("* формат: /connect host:port")
-            else:
-                await self.mesh.connect_to(host, int(port))
-        elif name == "send":
-            nick, _, path = rest.partition(" ")
-            if not nick or not path:
-                self._write("* формат: /send <ник> <путь к файлу>")
-            else:
-                await self.mesh.offer_file(nick, Path(path.strip()).expanduser())
-        elif name == "accept":
-            await self.mesh.respond_to_offer(rest, accept=True)
-        elif name == "decline":
-            await self.mesh.respond_to_offer(rest, accept=False)
-        else:
-            self._write(f"* неизвестная команда {name}; /help покажет список")
+        handler = self.COMMANDS.get(name)
+        if handler is None:
+            self._write(f"· неизвестная команда {name}; /help покажет список")
+            return True
+
+        await handler(self, rest)
         return True
+
+    # --- отдельные команды ----------------------------------------------------
+
+    async def _cmd_help(self, _rest: str) -> None:
+        self._write(HELP)
+
+    async def _cmd_peers(self, _rest: str) -> None:
+        peers = self.mesh.peers
+        self._write("На связи: " + (", ".join(peers) if peers else "никого"))
+
+    async def _cmd_fingerprint(self, _rest: str) -> None:
+        self._write(f"Мой отпечаток: {self.mesh.identity.fingerprint()}")
+
+    async def _cmd_verify(self, rest: str) -> None:
+        if self.trust.mark_verified(rest):
+            self._write(self.palette.green(f"✓ {rest} отмечен как сверенный"))
+        else:
+            self._write(self.palette.red(f"✗ {rest} не найден среди известных"))
+
+    async def _cmd_forget(self, rest: str) -> None:
+        if self.trust.forget(rest):
+            self._write(f"· ключ {rest} забыт; при следующем соединении запомню новый")
+        else:
+            self._write(f"· {rest} и так неизвестен")
+
+    async def _cmd_connect(self, rest: str) -> None:
+        host, _, port = rest.rpartition(":")
+        if not host or not port.isdigit():
+            self._write("· формат: /connect host:port")
+            return
+        await self.mesh.connect_to(host, int(port))
+
+    async def _cmd_send(self, rest: str) -> None:
+        nick, _, path = rest.partition(" ")
+        if not nick or not path.strip():
+            self._write("· формат: /send <ник> <путь к файлу>")
+            return
+        await self.mesh.offer_file(nick, Path(path.strip()).expanduser())
+
+    async def _cmd_accept(self, rest: str) -> None:
+        await self.mesh.respond_to_offer(rest, accept=True)
+
+    async def _cmd_decline(self, rest: str) -> None:
+        await self.mesh.respond_to_offer(rest, accept=False)
+
+    async def _cmd_whisper(self, rest: str) -> None:
+        nick, _, body = rest.partition(" ")
+        body = body.strip()
+        if not nick or not body:
+            self._write("· формат: /w <ник> <текст>")
+        elif await self.mesh.send_text(nick, body):
+            self._write(self.palette.dim(f"→ {nick}: {body}"))
+        else:
+            self._write(f"· {nick} не на связи")
+
+    COMMANDS = {
+        "help": _cmd_help,
+        "peers": _cmd_peers,
+        "fingerprint": _cmd_fingerprint,
+        "verify": _cmd_verify,
+        "forget": _cmd_forget,
+        "connect": _cmd_connect,
+        "send": _cmd_send,
+        "accept": _cmd_accept,
+        "decline": _cmd_decline,
+        "w": _cmd_whisper,
+        "msg": _cmd_whisper,
+        "tell": _cmd_whisper,
+    }
 
 
 class PromptToolkitConsole(Console):

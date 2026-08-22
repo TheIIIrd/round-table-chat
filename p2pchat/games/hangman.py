@@ -96,7 +96,8 @@ class Hangman:
             return [Say(f"Осталась минута — слово всё ещё «{self.masked()}».")]
         return []
 
-    def snapshot_for(self, player: str) -> str:
+    def snapshot_for(self, _player: str) -> str:
+        # Игра кооперативная: у всех одно и то же состояние, личного нет.
         return self.render() if self.secret else ""
 
     # --- правила --------------------------------------------------------------

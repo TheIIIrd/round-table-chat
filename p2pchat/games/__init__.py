@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import secrets
 from random import Random
 
 from .api import Action, Finish, Game, GameError, Say, Whisper
@@ -25,8 +26,6 @@ CATALOG: dict[str, type] = {
 
 
 def build_host(rng: Random | None = None) -> GameHost:
-    import secrets
-
     return GameHost(
         catalog={name: (lambda r, cls=cls: cls(r)) for name, cls in CATALOG.items()},
         rng=rng or Random(secrets.randbits(64)),

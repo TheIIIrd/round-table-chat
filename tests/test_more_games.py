@@ -1,5 +1,10 @@
 """Тесты добавленных игр."""
 
+# Тест проверяет в том числе внутреннее состояние — иначе половину
+# свойств безопасности не подтвердить. Импорты внутри функций держат
+# сценарии самодостаточными.
+# pylint: disable=protected-access,import-outside-toplevel
+
 from __future__ import annotations
 
 from random import Random

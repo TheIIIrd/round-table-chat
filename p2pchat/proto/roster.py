@@ -78,7 +78,7 @@ class Roster:
     @classmethod
     def load(cls, path: str | Path) -> "Roster":
         try:
-            raw = json.loads(Path(path).read_text())
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RosterError(f"не читается файл ростера: {exc}") from exc
         return cls.from_json(raw)

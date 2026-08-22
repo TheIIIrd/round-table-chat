@@ -264,7 +264,11 @@ class Session:
                 await self._dispatch(kind, payload)
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:  # noqa: BLE001 — исключение уходит в receive()
+        # pylint: disable-next=broad-exception-caught
+        except BaseException as exc:
+            # Ловим BaseException намеренно: любая причина остановки читающей
+            # задачи должна дойти до вызывающего через receive(), иначе он
+            # повиснет навсегда. CancelledError отфильтрован выше.
             self._closed = True
             failure = exc if isinstance(exc, Exception) else LinkClosed(str(exc))
             self._failure = failure

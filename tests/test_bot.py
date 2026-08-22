@@ -1,5 +1,10 @@
 """Тесты бота: разбор команд, ограничения, поведение в меше."""
 
+# Тест проверяет в том числе внутреннее состояние — иначе половину
+# свойств безопасности не подтвердить. Импорты внутри функций держат
+# сценарии самодостаточными.
+# pylint: disable=protected-access,import-outside-toplevel
+
 from __future__ import annotations
 
 import asyncio
@@ -90,7 +95,7 @@ def test_token_bucket_refills():
 def test_handler_timeout_is_reported():
     registry = Registry()
 
-    @registry.command("hang", help="зависает")
+    @registry.command("hang", summary="зависает")
     async def hang(ctx):
         await asyncio.sleep(10)
         return "не должно дойти"
@@ -109,7 +114,7 @@ def test_handler_timeout_is_reported():
 def test_failing_handler_does_not_propagate():
     registry = Registry()
 
-    @registry.command("boom", help="падает")
+    @registry.command("boom", summary="падает")
     def boom(ctx):
         raise RuntimeError("внутренняя ошибка")
 
@@ -228,7 +233,9 @@ def test_bot_ignores_other_bots():
         bot.mesh.broadcast = lambda text: sent.append(text)  # type: ignore[assignment]
 
         await bot._handle(
-            ev.TextMessage(nick="other", public=b"\x03" * 32, text="!roll d20", lamport=1, is_bot=True)
+            ev.TextMessage(
+                nick="other", public=b"\x03" * 32, text="!roll d20", lamport=1, is_bot=True
+            )
         )
         assert sent == []
 

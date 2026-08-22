@@ -114,7 +114,8 @@ class GameHost:
     def _open(self, player: str, name: str, now: float) -> list[Action]:
         if not name:
             listing = ", ".join(
-                f"{key} — {factory(Random(0)).title}" for key, factory in sorted(self.catalog.items())
+                f"{key} — {factory(Random(0)).title}"
+                for key, factory in sorted(self.catalog.items())
             )
             return [Say(f"Доступные игры: {listing}\nНачать: !game <имя>, затем !join и !start")]
 
@@ -213,7 +214,9 @@ class GameHost:
         if self.phase is not Phase.RUNNING or self.game is None or player not in self.players:
             return []
         snapshot = self.game.snapshot_for(player)
-        return [Whisper(player, f"Вы вернулись в «{self.game.title}».\n{snapshot}")] if snapshot else []
+        if not snapshot:
+            return []
+        return [Whisper(player, f"Вы вернулись в «{self.game.title}».\n{snapshot}")]
 
     def tick(self, now: float | None = None) -> list[Action]:
         now = time.monotonic() if now is None else now

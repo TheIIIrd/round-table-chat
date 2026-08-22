@@ -11,6 +11,11 @@
 команд, которые не требуют сети.
 """
 
+# Тест проверяет в том числе внутреннее состояние — иначе половину
+# свойств безопасности не подтвердить. Импорты внутри функций держат
+# сценарии самодостаточными.
+# pylint: disable=protected-access,import-outside-toplevel
+
 from __future__ import annotations
 
 import ast
@@ -95,12 +100,8 @@ def test_keygen_invite_and_roster_roundtrip(tmp_path, monkeypatch):
 
     assert cli.main(["--home", str(home), "roster", "new", "друзья"]) == 0
     bob = Identity.generate("боб")
-    assert (
-        cli.main(
-            ["--home", str(home), "roster", "add", "боб", bob.public.hex(), "--address", "10.0.0.2:9333"]
-        )
-        == 0
-    )
+    add = ["--home", str(home), "roster", "add", "боб", bob.public.hex()]
+    assert cli.main(add + ["--address", "10.0.0.2:9333"]) == 0
     assert cli.main(["--home", str(home), "roster", "show"]) == 0
 
     roster = Roster.load(home / "roster.json")
@@ -143,9 +144,7 @@ def test_group_invite_cycle(tmp_path, monkeypatch, capsys):
     cli.main(["--home", str(alice), "keygen", "--nick", "alice"])
     cli.main(["--home", str(carol), "keygen", "--nick", "carol"])
     cli.main(["--home", str(alice), "roster", "new", "друзья"])
-    cli.main(
-        ["--home", str(alice), "roster", "add", "боб", Identity.generate().public.hex()]
-    )
+    cli.main(["--home", str(alice), "roster", "add", "боб", Identity.generate().public.hex()])
     capsys.readouterr()
 
     cli.main(["--home", str(alice), "invite", "--group"])
@@ -260,3 +259,39 @@ def test_every_game_verb_has_english_canonical_form():
             assert verb.isascii(), f"{name}: команда «{verb}» должна быть латиницей"
         for alias, target in getattr(game_class, "aliases", {}).items():
             assert target in game_class.verbs, f"{name}: синоним «{alias}» ведёт в никуда"
+
+
+def test_console_command_table_covers_help():
+    """Каждая команда из справки должна быть в таблице, и наоборот."""
+    import re as _re
+
+    from p2pchat.ui.console import ALIASES, HELP, Console
+
+    documented = set(_re.findall(r"^\s{2}/(\w+)", HELP, _re.MULTILINE))
+    implemented = set(Console.COMMANDS) | {"quit"}
+    assert documented <= implemented, f"в справке есть несуществующие: {documented - implemented}"
+
+    # Синонимы ведут только в существующие команды.
+    for alias, target in ALIASES.items():
+        assert target in implemented, f"синоним /{alias} ведёт в никуда"
+
+
+def test_key_file_parsing_rejects_damage(tmp_path, monkeypatch):
+    """После разделения разбора файла ключа проверки остались на месте."""
+    from p2pchat.crypto import identity as ident
+    from p2pchat.crypto.identity import Identity, KeyFileError
+
+    monkeypatch.setattr(ident, "ARGON2_MEMORY_KIB", 8 * 1024)
+    monkeypatch.setattr(ident, "ARGON2_TIME_COST", 1)
+
+    path = tmp_path / "id.key"
+    Identity.generate().save(path, "пассфраза")
+    raw = bytearray(path.read_bytes())
+
+    for damage in (raw[:-1], raw + b"\x00", b"NOTAKEYFILE" + raw[11:]):
+        path.write_bytes(bytes(damage))
+        try:
+            Identity.load(path, "пассфраза")
+            raise AssertionError("повреждённый файл принят")
+        except KeyFileError:
+            pass

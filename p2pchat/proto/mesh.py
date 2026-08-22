@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ..crypto.identity import Identity, fingerprint
 from ..net.discovery import Discovery
-from ..net.link import Link, LinkClosed
+from ..net.link import LinkClosed
 from ..net.tcp import TcpLink, serve
 from . import events as ev
 from .envelope import (
@@ -173,11 +173,12 @@ class Mesh:
                 prologue=self.prologue,
                 payload=self.nickname.encode("utf-8"),
             )
-        except (LinkClosed, SessionError, Exception) as exc:  # noqa: BLE001
+        # pylint: disable-next=broad-exception-caught
+        except Exception as exc:
             await self._emit(ev.Notice(f"не удалось соединиться с {host}:{port}: {exc}"))
             return
         self.trust.remember_address(session.remote_static, host, port)
-        await self._register(session, dialed=True)
+        await self._register(session)
 
     def _candidate_address(self, member: Member) -> tuple[str, int] | None:
         """Откуда узнаём, куда звонить: три источника по убыванию свежести.
@@ -209,7 +210,7 @@ class Mesh:
             )
         )
 
-    def _on_discovered(self, public: bytes, host: str, port: int, nick: str) -> None:
+    def _on_discovered(self, public: bytes, host: str, port: int, _nick: str) -> None:
         if self.roster is None or self.roster.by_key(public) is None:
             return  # бикон не из нашей группы или от неизвестного ключа
         if self._discovered.get(public) == (host, port):
@@ -249,12 +250,13 @@ class Mesh:
                         prologue=self.prologue,
                         payload=self.nickname.encode("utf-8"),
                     )
-                except Exception:  # noqa: BLE001 — пир просто ещё не поднялся
-                    continue
+                # pylint: disable-next=broad-exception-caught
+                except Exception:
+                    continue  # пир ещё не поднялся — попробуем на следующем круге
                 finally:
                     self._dialing.discard(member.public)
                 self.trust.remember_address(member.public, host, port)
-                await self._register(session, dialed=True)
+                await self._register(session)
 
             everyone_here = all(member.public in self._connections for member in expected)
             delay = RECONNECT_DELAY if everyone_here else min(delay * 2, MAX_DIAL_BACKOFF)
@@ -268,10 +270,13 @@ class Mesh:
                 prologue=self.prologue,
                 payload=self.nickname.encode("utf-8"),
             )
-        except Exception as exc:  # noqa: BLE001
+        # pylint: disable-next=broad-exception-caught
+        except Exception as exc:
+            # Кто угодно может постучаться в открытый порт; неудачный хендшейк
+            # не повод ронять слушающий сокет.
             await self._emit(ev.Notice(f"входящее соединение отклонено: {exc}"))
             return
-        await self._register(session, dialed=False)
+        await self._register(session)
         conn = self._connections.get(session.remote_static)
         if conn is not None:
             with contextlib.suppress(asyncio.CancelledError):
@@ -279,7 +284,7 @@ class Mesh:
 
     # --- регистрация и проверка доверия ---------------------------------------
 
-    async def _register(self, session: Session, *, dialed: bool) -> None:
+    async def _register(self, session: Session) -> None:
         public = session.remote_static
         member = await self._authorize(session, public)
         if member is None:
@@ -308,7 +313,9 @@ class Mesh:
                 verified=decision is TrustDecision.VERIFIED,
             )
         )
-        await self._send_to_session(session, make(TYPE_PRESENCE, self.clock, self.nickname.encode()))
+        await self._send_to_session(
+            session, make(TYPE_PRESENCE, self.clock, self.nickname.encode())
+        )
         if self.listen is not None:
             # Сообщаем свой порт внутри уже зашифрованного канала: тот, кто с
             # нами хоть раз соединился, переживёт смену нашего IP. Хост не шлём —
@@ -372,10 +379,11 @@ class Mesh:
                 self.clock.observe(envelope.lamport)
                 await self._handle(member, session, envelope)
         except asyncio.CancelledError:
-            raise
+            raise  # отмена задачи не должна попасть в общий обработчик ниже
         except LinkClosed as exc:
             reason = str(exc)
-        except Exception as exc:  # noqa: BLE001
+        # pylint: disable-next=broad-exception-caught
+        except Exception as exc:
             reason = f"ошибка: {exc}"
         finally:
             current = self._connections.get(member.public)
@@ -485,7 +493,7 @@ class Mesh:
     @staticmethod
     def _observed_host(session: Session) -> str | None:
         description = getattr(session, "link_description", "")
-        host, _, port = description.rpartition(":")
+        host, _, _port = description.rpartition(":")
         return host or None
 
     # --- отправка -------------------------------------------------------------

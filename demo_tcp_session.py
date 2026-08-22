@@ -20,6 +20,7 @@ PROLOGUE = build_prologue(mode="direct")
 
 
 async def responder_side(link) -> None:
+    """Отвечающая сторона: принимает соединение и повторяет присланное."""
     identity = Identity.generate("bob")
     session = await Session.accept(link, identity, prologue=PROLOGUE, payload=b"bob")
     print(f"[bob]   пир представился ключом {fingerprint(session.remote_static)}")
@@ -34,6 +35,7 @@ async def responder_side(link) -> None:
 
 
 async def main() -> None:
+    """Поднимает сервер и клиента в одном процессе и гоняет между ними трафик."""
     identity = Identity.generate("alice")
     server = await serve("127.0.0.1", 0, responder_side)
     port = server.sockets[0].getsockname()[1]
@@ -50,10 +52,10 @@ async def main() -> None:
         await session.send(text.encode())
         print(f"[alice] ответ: {(await session.receive()).decode()}")
 
-    key_before = session._send_cs.k
     print("\n--- ротация ключей свежим DH ---")
+    before = session.rekey_count
     await session.rekey()
-    print(f"[alice] ключ отправки сменился: {key_before != session._send_cs.k}")
+    print(f"[alice] ротаций ключа: было {before}, стало {session.rekey_count}")
     print("[alice] старые ключи больше не расшифруют новый трафик\n")
 
     await session.send("сообщение в новой эпохе".encode())
