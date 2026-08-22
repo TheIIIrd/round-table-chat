@@ -5,9 +5,15 @@
 человеком, поэтому «забыть напомнить» здесь дороже, чем ошибка в разборе.
 """
 
+# Тест проверяет в том числе внутреннее состояние — иначе половину
+# свойств безопасности не подтвердить. Импорты внутри функций держат
+# сценарии самодостаточными.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import asyncio
+import inspect
 import tempfile
 from pathlib import Path
 
@@ -15,6 +21,7 @@ from p2pchat.crypto.identity import Identity
 from p2pchat.proto import events as ev
 from p2pchat.proto.trust import TrustStore
 from p2pchat.ui.console import Console
+from p2pchat.ui.style import Palette
 
 
 class FakeMesh:
@@ -42,11 +49,17 @@ class FakeMesh:
         self.connects.append((host, port))
 
 
-def build(tmp: Path):
+def build(tmp: Path, *, color: bool = False):
+    """Консоль с явно заданной палитрой.
+
+    Палитра задаётся явно не для красоты: без неё она определялась бы по
+    окружению, и тест на текст проходил бы при выводе в конвейер и падал в
+    настоящем терминале. Тест не должен зависеть от того, как его запустили.
+    """
     identity = Identity.generate("alice")
     trust = TrustStore.load(tmp / "known.json")
     mesh = FakeMesh(identity)
-    console = Console(mesh, trust)
+    console = Console(mesh, trust, palette=Palette(enabled=color))
     console._write = lambda text: console_output.append(text)  # type: ignore[assignment]
     return console, mesh, trust
 
@@ -131,8 +144,8 @@ def test_unverified_peer_is_marked_on_every_line():
 
         asyncio.run(scenario())
 
-        assert console_output[0] == "!<bob> первое"  # ещё не сверен
-        assert console_output[1] == "<bob> второе"  # после /verify метки нет
+        assert console_output[0] == "?bob: первое"  # ещё не сверен
+        assert console_output[1] == "bob: второе"  # после /verify метки нет
 
 
 def test_plain_text_goes_to_chat():
@@ -146,3 +159,126 @@ def test_plain_text_goes_to_chat():
 
         asyncio.run(scenario())
         assert mesh.broadcasts == ["обычное сообщение"]
+
+
+# --- цвет ------------------------------------------------------------------------
+
+
+def test_color_is_disabled_without_terminal(monkeypatch):
+    from p2pchat.ui.style import build_palette, supports_color
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert supports_color() is False
+
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("TERM", "dumb")
+    assert supports_color() is False
+
+    assert build_palette(False).red("текст") == "текст"
+
+
+def test_nick_color_follows_key_not_name():
+    """Цвет привязан к ключу: подделать чужой, взяв его ник, не выйдет."""
+    from p2pchat.ui.style import Palette
+
+    palette = Palette(enabled=True)
+    key_a, key_b = b"\x01" * 32, b"\x02" * 32
+    assert palette.nick("bob", key_a) != palette.nick("bob", key_b)
+    assert palette.nick("bob", key_a) == palette.nick("bob", key_a)
+    assert "bob" in palette.nick("bob", key_a)
+
+
+def test_incoming_text_cannot_drive_the_terminal():
+    """Чужое сообщение не должно чистить экран и двигать курсор."""
+    with tempfile.TemporaryDirectory() as tmp:
+        console_output.clear()
+        console, mesh, trust = build(Path(tmp))
+        peer = Identity.generate("bob").public
+        trust.remember("bob", peer, verified=True)
+
+        hostile = "\x1b[2Jочистка\x1b]0;чужой заголовок\x07\x00"
+        line = console._decorate(
+            ev.TextMessage(nick="bob", public=peer, text=hostile, lamport=1)
+        )
+        assert "\x1b[2J" not in line
+        assert "\x07" not in line and "\x00" not in line
+        assert "очистка" in line
+
+
+def test_bot_lines_are_marked_even_without_color():
+    with tempfile.TemporaryDirectory() as tmp:
+        console, _, _ = build(Path(tmp))
+        line = console._decorate(
+            ev.TextMessage(
+                nick="dice",
+                public=b"\x03" * 32,
+                text="строка\nвторая",
+                lamport=1,
+                is_bot=True,
+            )
+        )
+        assert line.split("\n") == ["┃ строка", "┃ вторая"]
+
+
+def test_marks_survive_color_being_on():
+    """Пометки должны читаться и в цветном терминале, а не только в конвейере.
+
+    Регрессия: тесты задавали палитру по окружению, поэтому в конвейере они
+    проходили, а в настоящем терминале падали — цвет добавлял ANSI-коды вокруг
+    ровно тех символов, которые проверялись.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        console, _, trust = build(Path(tmp), color=True)
+        peer = Identity.generate("bob").public
+        trust.remember("bob", peer)
+
+        unverified = console._decorate(
+            ev.TextMessage(nick="bob", public=peer, text="привет", lamport=1)
+        )
+        assert "?" in unverified and "привет" in unverified
+        assert "\x1b[" in unverified  # цвет действительно включён
+
+        bot_line = console._decorate(
+            ev.TextMessage(
+                nick="dice", public=b"\x03" * 32, text="раз\nдва", lamport=1, is_bot=True
+            )
+        )
+        assert bot_line.count("┃") == 2
+
+
+def test_alert_emits_single_reset():
+    """Вложенные red(bold(...)) давали два сброса подряд — мусор в выводе."""
+    from p2pchat.ui.style import Palette as _Palette
+
+    painted = _Palette(enabled=True).alert("ВНИМАНИЕ")
+    assert painted.count("\x1b[0m") == 1
+    assert painted.startswith("\x1b[")
+    assert _Palette(enabled=False).alert("ВНИМАНИЕ") == "ВНИМАНИЕ"
+
+
+def test_plain_console_can_be_forced():
+    """Должен быть способ обойти prompt_toolkit, не удаляя пакет."""
+    from p2pchat.ui.console import Console as _Console
+    from p2pchat.ui.console import PromptToolkitConsole, build_console
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trust = TrustStore.load(Path(tmp) / "known.json")
+        mesh = FakeMesh(Identity.generate("alice"))
+        console = build_console(mesh, trust, Palette(enabled=False), plain=True)
+        assert type(console) is _Console
+        assert not isinstance(console, PromptToolkitConsole)
+
+
+def test_prompt_toolkit_console_does_not_print_raw_ansi():
+    """Регрессия: patch_stdout заменял \\x1b на «?», и цвет превращался в мусор.
+
+    Библиотеки здесь нет, поэтому проверяем то, что можно проверить без неё:
+    класс обязан переопределять _write, а не наследовать печать через print.
+    """
+    from p2pchat.ui.console import Console as _Console
+    from p2pchat.ui.console import PromptToolkitConsole
+
+    assert PromptToolkitConsole._write is not _Console._write
+    source = inspect.getsource(PromptToolkitConsole._write)
+    assert "self._print" in source and "self._ansi" in source

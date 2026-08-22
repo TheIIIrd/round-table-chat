@@ -45,10 +45,12 @@ Handler = Callable[..., Awaitable[str] | str]
 
 @dataclass
 class Command:
+    """Одна команда бота: имя, разбор аргументов, обработчик и строка справки."""
+
     name: str
     pattern: re.Pattern
     handler: Handler
-    help: str
+    summary: str
 
 
 @dataclass
@@ -73,24 +75,50 @@ class Registry:
 
     def __init__(self) -> None:
         self._commands: dict[str, Command] = {}
+        self._aliases: dict[str, str] = {}
         self._buckets: dict[bytes, TokenBucket] = {}
 
-    def command(self, name: str, pattern: str = r"", help: str = ""):
-        """Регистрирует обработчик. ``pattern`` якорится целиком."""
+    def command(
+        self,
+        name: str,
+        pattern: str = r"",
+        summary: str = "",
+        aliases: tuple[str, ...] = (),
+    ):
+        """Регистрирует обработчик. ``pattern`` якорится целиком.
+
+        Каноническое имя английское — только оно попадает в подсказки. Русские
+        синонимы работают молча: тому, кто пишет «!бросок», незачем объяснять,
+        что команда «на самом деле» называется roll.
+        """
 
         def decorate(handler: Handler) -> Handler:
             compiled = re.compile(rf"^{pattern}$" if pattern else r"^$")
-            self._commands[name] = Command(name=name, pattern=compiled, handler=handler, help=help)
+            self._commands[name] = Command(
+                name=name, pattern=compiled, handler=handler, summary=summary
+            )
+            for alias in aliases:
+                self._aliases[alias] = name
             return handler
 
         return decorate
+
+    def resolve(self, name: str) -> str | None:
+        lowered = name.lower()
+        if lowered in self._commands:
+            return lowered
+        return self._aliases.get(lowered)
 
     @property
     def names(self) -> list[str]:
         return sorted(self._commands)
 
     def help_lines(self) -> list[str]:
-        return [f"{PREFIX}{cmd.name} — {cmd.help}" for cmd in self._commands.values() if cmd.help]
+        return [
+            f"{PREFIX}{cmd.name} — {cmd.summary}"
+            for cmd in self._commands.values()
+            if cmd.summary
+        ]
 
     async def dispatch(self, ctx: Context, text: str) -> str | None:
         """Возвращает ответ бота или ``None``, если реагировать не нужно."""
@@ -98,7 +126,8 @@ class Registry:
             return None
 
         name, _, argument = text[len(PREFIX) :].strip().partition(" ")
-        command = self._commands.get(name.lower())
+        resolved = self.resolve(name)
+        command = self._commands.get(resolved) if resolved else None
         if command is None:
             return None
 
@@ -116,7 +145,11 @@ class Registry:
                 result = await asyncio.wait_for(result, HANDLER_TIMEOUT)
         except asyncio.TimeoutError:
             return f"{ctx.nick}: команда выполнялась слишком долго и была прервана."
-        except Exception as exc:  # noqa: BLE001 — бот не должен падать от одной команды
+        # pylint: disable-next=broad-exception-caught
+        except Exception as exc:
+            # Обработчик команд — чужой код, исполняемый по вводу из сети.
+            # Любое его исключение должно остаться одной строкой в чате,
+            # а не уронить бота вместе с текущей партией.
             return f"{ctx.nick}: команда не выполнилась ({type(exc).__name__})."
 
         return str(result)[:MAX_REPLY_LEN] if result else None

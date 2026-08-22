@@ -95,30 +95,33 @@ class Identity:
     @classmethod
     def load(cls, path: str | Path, passphrase: str, nickname: str = "") -> "Identity":
         raw = Path(path).read_bytes()
-        head_len = len(MAGIC) + 3 + 4 + SALT_LEN + NONCE_LEN
-        if len(raw) != head_len + p.DHLEN + p.TAGLEN:
-            raise KeyFileError("некорректный размер файла ключа")
-        if raw[: len(MAGIC)] != MAGIC:
-            raise KeyFileError("это не файл ключа p2pchat")
-
-        offset = len(MAGIC)
-        version, t_cost, lanes = raw[offset], raw[offset + 1], raw[offset + 2]
-        if version != VERSION:
-            raise KeyFileError(f"неподдерживаемая версия формата: {version}")
-        offset += 3
-        m_cost = int.from_bytes(raw[offset : offset + 4], "big")
-        offset += 4
-        salt = raw[offset : offset + SALT_LEN]
-        offset += SALT_LEN
-        header = raw[:head_len]
-        blob = raw[head_len:]
-
-        key = _derive(passphrase, salt, t_cost, m_cost, lanes)
+        header, params, blob = _split_key_file(raw)
+        key = _derive(passphrase, *params)
         try:
             private = p.decrypt(key, 0, header, blob)
         except p.InvalidTag as exc:
             raise KeyFileError("неверная пассфраза или файл повреждён") from exc
         return cls(keypair=p.KeyPair.from_private_bytes(private), nickname=nickname)
+
+
+HEADER_LEN = len(MAGIC) + 3 + 4 + SALT_LEN + NONCE_LEN
+
+
+def _split_key_file(raw: bytes) -> tuple[bytes, tuple[bytes, int, int, int], bytes]:
+    """Разбирает файл ключа на заголовок, параметры Argon2id и шифротекст."""
+    if len(raw) != HEADER_LEN + p.DHLEN + p.TAGLEN:
+        raise KeyFileError("некорректный размер файла ключа")
+    if raw[: len(MAGIC)] != MAGIC:
+        raise KeyFileError("это не файл ключа p2pchat")
+
+    version, t_cost, lanes = raw[len(MAGIC)], raw[len(MAGIC) + 1], raw[len(MAGIC) + 2]
+    if version != VERSION:
+        raise KeyFileError(f"неподдерживаемая версия формата: {version}")
+
+    at = len(MAGIC) + 3
+    m_cost = int.from_bytes(raw[at : at + 4], "big")
+    salt = raw[at + 4 : at + 4 + SALT_LEN]
+    return raw[:HEADER_LEN], (salt, t_cost, m_cost, lanes), raw[HEADER_LEN:]
 
 
 def _derive(passphrase: str, salt: bytes, t_cost: int, m_cost: int, lanes: int) -> bytes:

@@ -26,6 +26,7 @@ TYPE_FILE_ACCEPT = 4
 TYPE_FILE_DECLINE = 5
 TYPE_FILE_CHUNK = 6
 TYPE_FILE_DONE = 7
+TYPE_ADDRESS = 8
 
 KNOWN_TYPES = frozenset(
     {
@@ -36,6 +37,7 @@ KNOWN_TYPES = frozenset(
         TYPE_FILE_DECLINE,
         TYPE_FILE_CHUNK,
         TYPE_FILE_DONE,
+        TYPE_ADDRESS,
     }
 )
 

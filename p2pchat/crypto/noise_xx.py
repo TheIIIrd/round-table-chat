@@ -138,27 +138,31 @@ class HandshakeState:
         отсутствующая проверка.
         """
         if token == "ee":
-            return p.dh(self._need_local_e(token), self._need_remote(self.re, "эфемерный", token))
+            return p.dh(self._my_e(token), self._their_e(token))
         if token == "es":
             if self.initiator:
-                return p.dh(self._need_local_e(token), self._need_remote(self.rs, "статический", token))
-            return p.dh(self.s, self._need_remote(self.re, "эфемерный", token))
+                return p.dh(self._my_e(token), self._their_s(token))
+            return p.dh(self.s, self._their_e(token))
         if token == "se":
             if self.initiator:
-                return p.dh(self.s, self._need_remote(self.re, "эфемерный", token))
-            return p.dh(self._need_local_e(token), self._need_remote(self.rs, "статический", token))
+                return p.dh(self.s, self._their_e(token))
+            return p.dh(self._my_e(token), self._their_s(token))
         raise NoiseError(f"неизвестный токен паттерна: {token}")
 
-    def _need_local_e(self, token: str) -> p.KeyPair:
+    def _my_e(self, token: str) -> p.KeyPair:
         if self.e is None:
             raise NoiseError(f"токен {token}: локальный эфемерный ключ ещё не создан")
         return self.e
 
-    @staticmethod
-    def _need_remote(value: bytes | None, kind: str, token: str) -> bytes:
-        if value is None:
-            raise NoiseError(f"токен {token}: {kind} ключ пира ещё не получен")
-        return value
+    def _their_e(self, token: str) -> bytes:
+        if self.re is None:
+            raise NoiseError(f"токен {token}: эфемерный ключ пира ещё не получен")
+        return self.re
+
+    def _their_s(self, token: str) -> bytes:
+        if self.rs is None:
+            raise NoiseError(f"токен {token}: статический ключ пира ещё не получен")
+        return self.rs
 
     @staticmethod
     def _take(view: memoryview, offset: int, size: int, what: str) -> int:

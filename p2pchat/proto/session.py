@@ -145,6 +145,11 @@ class Session:
         return self._closed
 
     @property
+    def link_description(self) -> str:
+        """Как выглядит канал: для TCP — фактический адрес пира."""
+        return self._link.description
+
+    @property
     def rekey_count(self) -> int:
         """Сколько раз ключи сессии сменились свежим DH."""
         return self._rekey_count
@@ -259,7 +264,11 @@ class Session:
                 await self._dispatch(kind, payload)
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:  # noqa: BLE001 — исключение уходит в receive()
+        # pylint: disable-next=broad-exception-caught
+        except BaseException as exc:
+            # Ловим BaseException намеренно: любая причина остановки читающей
+            # задачи должна дойти до вызывающего через receive(), иначе он
+            # повиснет навсегда. CancelledError отфильтрован выше.
             self._closed = True
             failure = exc if isinstance(exc, Exception) else LinkClosed(str(exc))
             self._failure = failure

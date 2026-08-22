@@ -20,11 +20,14 @@ import sys
 from pathlib import Path
 
 from .bot.runner import Bot
-from .crypto.identity import Identity, KeyFileError
+from .crypto.identity import Identity, KeyFileError, fingerprint
+from .proto import invite as invites
+from .proto.invite import InviteError
 from .proto.mesh import Mesh
 from .proto.roster import Member, Roster, RosterError
 from .proto.trust import TrustStore
 from .ui.console import build_console
+from .ui.style import build_palette
 
 DEFAULT_HOME = Path(os.environ.get("P2PCHAT_HOME", Path.home() / ".p2pchat"))
 
@@ -35,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     try:
         return args.handler(args)
-    except (KeyFileError, RosterError, ValueError) as exc:
+    except (KeyFileError, RosterError, InviteError, ValueError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -44,37 +47,83 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="p2pchat", description="Безопасный консольный P2P-чат")
-    parser.add_argument("--home", type=Path, default=DEFAULT_HOME, help="каталог с ключом и данными")
+
+    # Общие флаги принимаются и до подкоманды, и после неё. argparse по
+    # умолчанию требует ставить их первыми, а человек естественно пишет
+    # `p2pchat chat --no-color` — и получает отказ на ровном месте.
+    # SUPPRESS нужен, чтобы значение из подкоманды не затирало заданное раньше.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--home", type=Path, default=argparse.SUPPRESS)
+    common.add_argument("--no-color", action="store_true", default=argparse.SUPPRESS)
+
+    parser.add_argument(
+        "--home", type=Path, default=DEFAULT_HOME, help="каталог с ключом и данными"
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="вывод без цвета (то же делает переменная NO_COLOR)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    keygen = sub.add_parser("keygen", help="создать долговременный ключ")
+    keygen = sub.add_parser("keygen", parents=[common], help="создать долговременный ключ")
     keygen.add_argument("--nick", default=getpass.getuser(), help="ник по умолчанию")
+    keygen.add_argument(
+        "--key-from-env",
+        action="store_true",
+        help="взять пассфразу из P2PCHAT_PASSPHRASE (для скриптов и локальных стендов)",
+    )
     keygen.set_defaults(handler=cmd_keygen)
 
-    whoami = sub.add_parser("whoami", help="показать свой ключ и отпечаток")
+    whoami = sub.add_parser("whoami", parents=[common], help="показать свой ключ и отпечаток")
     whoami.set_defaults(handler=cmd_whoami)
 
-    roster = sub.add_parser("roster", help="работа с составом группы")
+    roster = sub.add_parser("roster", parents=[common], help="работа с составом группы")
     roster_sub = roster.add_subparsers(dest="action", required=True)
 
-    r_new = roster_sub.add_parser("new", help="создать пустой ростер")
+    r_new = roster_sub.add_parser("new", parents=[common], help="создать пустой ростер")
     r_new.add_argument("name")
     r_new.set_defaults(handler=cmd_roster_new)
 
-    r_add = roster_sub.add_parser("add", help="добавить участника")
+    r_add = roster_sub.add_parser("add", parents=[common], help="добавить участника")
     r_add.add_argument("nick")
     r_add.add_argument("key", help="публичный ключ в hex")
     r_add.add_argument("--address", help="host:port, если участник принимает соединения")
     r_add.add_argument("--bot", action="store_true", help="пометить как бота")
     r_add.set_defaults(handler=cmd_roster_add)
 
-    r_show = roster_sub.add_parser("show", help="показать состав и идентификатор группы")
+    r_invite = roster_sub.add_parser("add-invite", parents=[common], help="добавить участника из приглашения")
+    r_invite.add_argument("invite", help="строка p2pchat:… или p2pchat-group:…")
+    r_invite.set_defaults(handler=cmd_roster_add_invite)
+
+    r_show = roster_sub.add_parser("show", parents=[common], help="показать состав и идентификатор группы")
     r_show.set_defaults(handler=cmd_roster_show)
 
-    chat = sub.add_parser("chat", help="запустить чат")
+    colors = sub.add_parser(
+        "colortest", parents=[common], help="проверить, как терминал показывает цвет"
+    )
+    colors.set_defaults(handler=cmd_colortest)
+
+    invite = sub.add_parser("invite", parents=[common], help="показать свою строку-приглашение")
+    invite.add_argument("--address", help="host:port, под которым вас видно снаружи")
+    invite.add_argument("--group", action="store_true", help="приглашение со всем ростером")
+    invite.set_defaults(handler=cmd_invite)
+
+    chat = sub.add_parser("chat", parents=[common], help="запустить чат")
     chat.add_argument("--nick", help="ник (по умолчанию из ключа)")
     chat.add_argument("--listen", default="0.0.0.0:9333", help="адрес для входящих, или none")
     chat.add_argument("--direct", help="host:port собеседника для режима один на один")
+    chat.add_argument(
+        "--discover",
+        choices=["lan", "off"],
+        default="off",
+        help="lan — искать участников в локальной сети мультикастом",
+    )
+    chat.add_argument(
+        "--plain",
+        action="store_true",
+        help="простой ввод без prompt_toolkit (если цвет или ввод ведут себя странно)",
+    )
     chat.add_argument(
         "--key-from-env",
         action="store_true",
@@ -82,9 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat.set_defaults(handler=cmd_chat)
 
-    bot = sub.add_parser("bot", help="запустить бота")
+    bot = sub.add_parser("bot", parents=[common], help="запустить бота")
     bot.add_argument("--nick", default="dice", help="ник бота")
     bot.add_argument("--listen", default="0.0.0.0:9334")
+    bot.add_argument("--discover", choices=["lan", "off"], default="off")
     bot.add_argument(
         "--key-from-env",
         action="store_true",
@@ -106,7 +156,12 @@ def cmd_keygen(args) -> int:
         print(f"Ключ уже существует: {path}", file=sys.stderr)
         return 1
 
-    passphrase = _ask_new_passphrase()
+    if args.key_from_env:
+        passphrase = os.environ.get("P2PCHAT_PASSPHRASE", "")
+        if len(passphrase) < 8:
+            raise ValueError("P2PCHAT_PASSPHRASE пуста или короче восьми символов")
+    else:
+        passphrase = _ask_new_passphrase()
     identity = Identity.generate(args.nick)
     identity.save(path, passphrase)
     (home / "nick").write_text(args.nick, encoding="utf-8")
@@ -172,6 +227,87 @@ def cmd_roster_show(args) -> int:
     return 0
 
 
+def cmd_colortest(args) -> int:
+    """Печатает образцы оформления, чтобы увидеть проблему без запуска чата."""
+    palette = build_palette(False if args.no_color else None)
+    enabled = palette.enabled
+
+    print(f"Цвет: {'включён' if enabled else 'выключен'}")
+    print(f"  isatty={sys.stdout.isatty()}  TERM={os.environ.get('TERM', '(пусто)')}  "
+          f"NO_COLOR={'есть' if os.environ.get('NO_COLOR') is not None else 'нет'}\n")
+
+    print(palette.nick("alice", b"\x01" * 32) + ": обычная реплика")
+    print(palette.yellow("?") + palette.nick("bob", b"\x02" * 32) + ": отпечаток не сверен")
+    print(palette.bot("┃ строка бота"))
+    print(palette.green("→ carol на связи"))
+    print(palette.grey("· служебное сообщение"))
+    print(palette.alert("⚠ ВНИМАНИЕ: предупреждение"))
+    print()
+
+    if enabled:
+        print("Если выше видны последовательности вида ?[38;5;114m вместо цвета —")
+        print("их съедает prompt_toolkit. Запустите чат с --plain.")
+    else:
+        print("Цвет отключён: не терминал, NO_COLOR, TERM=dumb или --no-color.")
+    return 0
+
+
+def cmd_invite(args) -> int:
+    identity = _load_identity(args)
+    nick = _default_nick(args)
+
+    if args.group:
+        roster = Roster.load(_roster_path(args))
+        print(invites.encode_group(roster))
+        print(f"\nГруппа «{roster.name}», участников: {len(roster.members)}")
+        print("Принять: p2pchat roster add-invite <строка>")
+        return 0
+
+    host, port = (_split_address(args.address) if args.address else (None, None))
+    if host is None:
+        roster_file = _roster_path(args)
+        if roster_file.exists():
+            member = Roster.load(roster_file).by_key(identity.public)
+            if member and member.address:
+                host, port = member.address
+    member = Member(nick=nick, public=identity.public, host=host, port=port)
+
+    print(invites.encode_peer(member))
+    print(f"\nОтпечаток: {identity.fingerprint()}")
+    if host is None:
+        print("Адрес не указан — добавьте --address host:port, иначе к вам не дозвонятся.")
+    print("Продиктуйте отпечаток голосом: строку могли подменить по дороге.")
+    return 0
+
+
+def cmd_roster_add_invite(args) -> int:
+    path = _roster_path(args)
+    text = args.invite.strip()
+
+    if invites.looks_like_group(text):
+        roster = invites.decode_group(text)
+        roster.save(path)
+        print(f"Ростер принят: группа «{roster.name}», участников {len(roster.members)}")
+        print(f"Идентификатор группы: {roster.group_id.hex()}")
+        for member in roster.members:
+            print(f"  {member.nick}: {fingerprint(member.public)}")
+        print("\nСверьте отпечатки с людьми напрямую — приглашение могли подменить.")
+        return 0
+
+    parsed = invites.decode_peer(text)
+    raw = json.loads(path.read_text()) if path.exists() else {"name": "group", "members": []}
+    raw.setdefault("members", [])
+    raw["members"].append(parsed.member.to_json())
+
+    roster = Roster.from_json(raw)  # проверка до записи
+    roster.save(path)
+    print(f"Добавлен {parsed.member.nick}")
+    print(f"Отпечаток: {parsed.fingerprint}")
+    print(f"Новый идентификатор группы: {roster.group_id.hex()}")
+    print("Раздайте обновлённый ростер всем: p2pchat invite --group")
+    return 0
+
+
 def cmd_chat(args) -> int:
     identity = _load_identity(args, from_env=args.key_from_env)
     nick = args.nick or _default_nick(args)
@@ -192,8 +328,14 @@ def cmd_chat(args) -> int:
         trust=trust,
         download_dir=args.home / "downloads",
         listen=listen,
+        discover_lan=args.discover == "lan",
     )
-    console = build_console(mesh, trust)
+    console = build_console(
+        mesh,
+        trust,
+        build_palette(False if args.no_color else None),
+        plain=args.plain,
+    )
 
     async def run() -> None:
         if args.direct:
@@ -223,6 +365,7 @@ def cmd_bot(args) -> int:
         roster=roster,
         trust_path=args.home / "bot_known_peers.json",
         listen=_parse_listen(args.listen),
+        discover_lan=args.discover == "lan",
     )
     try:
         asyncio.run(bot.run())

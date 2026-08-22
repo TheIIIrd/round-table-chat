@@ -17,28 +17,37 @@ from p2pchat.crypto.sas import sas_code
 PROLOGUE = b"p2pchat/1 mode=direct"
 
 
-def main() -> None:
-    alice = Identity.generate("alice")
-    bob = Identity.generate("bob")
-
+def show_identities(alice: Identity, bob: Identity) -> None:
     print("Долговременные отпечатки (публикуются заранее):")
     print(f"  alice  {alice.fingerprint()}")
     print(f"  bob    {bob.fingerprint()}\n")
 
+
+def exchange(hs_a: HandshakeState, hs_b: HandshakeState) -> None:
+    """Три сообщения паттерна XX с пояснением, что видно в каждом."""
+    first = hs_a.write_message()
+    hs_b.read_message(first)
+    print(f"-> e            {len(first):3d} байт   (статический ключ ещё не раскрыт)")
+
+    second = hs_b.write_message()
+    hs_a.read_message(second)
+    print(f"<- e, ee, s, es {len(second):3d} байт   (ключ Боба уже под шифром)")
+
+    third = hs_a.write_message(b"alice")
+    nick = hs_b.read_message(third)
+    print(f"-> s, se        {len(third):3d} байт   полезная нагрузка: {nick.decode()!r}\n")
+
+
+def main() -> None:
+    """Проводит хендшейк между двумя сторонами и печатает, что при этом видно."""
+    alice = Identity.generate("alice")
+    bob = Identity.generate("bob")
+
+    show_identities(alice, bob)
+
     hs_a = HandshakeState(initiator=True, static=alice.keypair, prologue=PROLOGUE)
     hs_b = HandshakeState(initiator=False, static=bob.keypair, prologue=PROLOGUE)
-
-    msg1 = hs_a.write_message()
-    hs_b.read_message(msg1)
-    print(f"-> e            {len(msg1):3d} байт   (статический ключ ещё не раскрыт)")
-
-    msg2 = hs_b.write_message()
-    hs_a.read_message(msg2)
-    print(f"<- e, ee, s, es {len(msg2):3d} байт   (ключ Боба уже под шифром)")
-
-    msg3 = hs_a.write_message(b"alice")
-    nick = hs_b.read_message(msg3)
-    print(f"-> s, se        {len(msg3):3d} байт   полезная нагрузка: {nick.decode()!r}\n")
+    exchange(hs_a, hs_b)
 
     print("Каждая сторона видит статический ключ собеседника:")
     print(f"  Алиса опознала: {fingerprint(hs_a.remote_static)}  == bob:   "
