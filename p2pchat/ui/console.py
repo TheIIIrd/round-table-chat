@@ -20,7 +20,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from ..format import sanitize
+from ..format import sanitize, strip_ansi
 from ..proto import events as ev
 from ..proto.mesh import Mesh
 from ..proto.trust import TrustStore
@@ -237,15 +237,40 @@ class Console:
 
 
 class PromptToolkitConsole(Console):
-    """Вариант с раздельными областями ввода и вывода."""
+    """Вариант с раздельными областями ввода и вывода.
+
+    Важная особенность, из-за которой здесь переопределён ``_write``:
+    ``patch_stdout()`` перехватывает обычный ``print`` и пропускает его через
+    ``Vt100_Output.write()``, который заменяет ``\x1b`` на ``?`` — защита от
+    того, чтобы печатаемый текст управлял терминалом. Наши ANSI-коды попадают
+    под ту же замену, и вместо цвета на экране появляется ``?[38;5;114m``.
+
+    Правильный путь — отдавать цвет через собственный API библиотеки:
+    ``print_formatted_text(ANSI(...))`` разбирает последовательности сам и
+    рисует их своими средствами.
+    """
 
     def __init__(self, mesh: Mesh, trust: TrustStore, palette: Palette | None = None) -> None:
         super().__init__(mesh, trust, palette)
-        from prompt_toolkit import PromptSession
+        from prompt_toolkit import PromptSession, print_formatted_text
+        from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.patch_stdout import patch_stdout
 
         self._session = PromptSession()
         self._patch = patch_stdout
+        self._print = print_formatted_text
+        self._ansi = ANSI
+
+    def _write(self, text: str) -> None:
+        if not self.palette.enabled:
+            print(text, flush=True)
+            return
+        try:
+            self._print(self._ansi(text))
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Библиотека могла не справиться с последовательностью. Показать
+            # текст без цвета лучше, чем не показать сообщение вовсе.
+            print(strip_ansi(text), flush=True)
 
     async def _input_loop(self) -> None:
         with self._patch():
@@ -263,8 +288,24 @@ class PromptToolkitConsole(Console):
                     await self.mesh.broadcast(line)
 
 
-def build_console(mesh: Mesh, trust: TrustStore, palette: Palette | None = None) -> Console:
+def build_console(
+    mesh: Mesh,
+    trust: TrustStore,
+    palette: Palette | None = None,
+    *,
+    plain: bool = False,
+) -> Console:
+    """Выбирает интерфейс.
+
+    ``plain`` заставляет взять простой вариант даже там, где prompt_toolkit
+    установлен: если библиотека в конкретном терминале ведёт себя странно,
+    у человека должен быть способ обойти её, не удаляя пакет.
+    """
+    if plain:
+        return Console(mesh, trust, palette)
     try:
         return PromptToolkitConsole(mesh, trust, palette)
-    except ImportError:
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Библиотеки может не быть, а может быть — и падать на этом терминале.
+        # Простой интерфейс работает всегда, поэтому откат молчаливый.
         return Console(mesh, trust, palette)

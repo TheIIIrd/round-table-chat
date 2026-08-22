@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
     r_show = roster_sub.add_parser("show", parents=[common], help="показать состав и идентификатор группы")
     r_show.set_defaults(handler=cmd_roster_show)
 
+    colors = sub.add_parser(
+        "colortest", parents=[common], help="проверить, как терминал показывает цвет"
+    )
+    colors.set_defaults(handler=cmd_colortest)
+
     invite = sub.add_parser("invite", parents=[common], help="показать свою строку-приглашение")
     invite.add_argument("--address", help="host:port, под которым вас видно снаружи")
     invite.add_argument("--group", action="store_true", help="приглашение со всем ростером")
@@ -113,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["lan", "off"],
         default="off",
         help="lan — искать участников в локальной сети мультикастом",
+    )
+    chat.add_argument(
+        "--plain",
+        action="store_true",
+        help="простой ввод без prompt_toolkit (если цвет или ввод ведут себя странно)",
     )
     chat.add_argument(
         "--key-from-env",
@@ -217,6 +227,31 @@ def cmd_roster_show(args) -> int:
     return 0
 
 
+def cmd_colortest(args) -> int:
+    """Печатает образцы оформления, чтобы увидеть проблему без запуска чата."""
+    palette = build_palette(False if args.no_color else None)
+    enabled = palette.enabled
+
+    print(f"Цвет: {'включён' if enabled else 'выключен'}")
+    print(f"  isatty={sys.stdout.isatty()}  TERM={os.environ.get('TERM', '(пусто)')}  "
+          f"NO_COLOR={'есть' if os.environ.get('NO_COLOR') is not None else 'нет'}\n")
+
+    print(palette.nick("alice", b"\x01" * 32) + ": обычная реплика")
+    print(palette.yellow("?") + palette.nick("bob", b"\x02" * 32) + ": отпечаток не сверен")
+    print(palette.bot("┃ строка бота"))
+    print(palette.green("→ carol на связи"))
+    print(palette.grey("· служебное сообщение"))
+    print(palette.alert("⚠ ВНИМАНИЕ: предупреждение"))
+    print()
+
+    if enabled:
+        print("Если выше видны последовательности вида ?[38;5;114m вместо цвета —")
+        print("их съедает prompt_toolkit. Запустите чат с --plain.")
+    else:
+        print("Цвет отключён: не терминал, NO_COLOR, TERM=dumb или --no-color.")
+    return 0
+
+
 def cmd_invite(args) -> int:
     identity = _load_identity(args)
     nick = _default_nick(args)
@@ -295,7 +330,12 @@ def cmd_chat(args) -> int:
         listen=listen,
         discover_lan=args.discover == "lan",
     )
-    console = build_console(mesh, trust, build_palette(False if args.no_color else None))
+    console = build_console(
+        mesh,
+        trust,
+        build_palette(False if args.no_color else None),
+        plain=args.plain,
+    )
 
     async def run() -> None:
         if args.direct:

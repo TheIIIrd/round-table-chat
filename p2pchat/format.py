@@ -34,6 +34,11 @@ def sanitize(text: str) -> str:
     return "\n".join(lines)
 
 
+def strip_ansi(text: str) -> str:
+    """Убирает последовательности цвета, оставляя сам текст."""
+    return ANSI.sub("", text)
+
+
 def width(text: str) -> int:
     """Ширина строки в знакоместах: широкие символы считаются за два."""
     total = 0

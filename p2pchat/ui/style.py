@@ -89,6 +89,24 @@ class Palette:
         return f"\x1b[38;5;{NICK_COLORS[index]}m{name}{RESET}"
 
 
+def _enable_windows_vt() -> bool:
+    """Включает разбор ANSI в консоли Windows 10+.
+
+    Без этого cmd.exe печатает последовательности как текст — ровно та же
+    картина, что даёт prompt_toolkit, но по другой причине.
+    """
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes  # pylint: disable=import-outside-toplevel
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # 7 = STD_OUTPUT_HANDLE, 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7))
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+
+
 def supports_color(stream=None, override: bool | None = None) -> bool:
     if override is not None:
         return override
@@ -98,9 +116,11 @@ def supports_color(stream=None, override: bool | None = None) -> bool:
         return False
     stream = stream or sys.stdout
     try:
-        return bool(stream.isatty())
+        if not stream.isatty():
+            return False
     except (AttributeError, ValueError):
         return False
+    return _enable_windows_vt()
 
 
 def build_palette(override: bool | None = None) -> Palette:

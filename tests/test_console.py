@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import tempfile
 from pathlib import Path
 
@@ -254,3 +255,30 @@ def test_alert_emits_single_reset():
     assert painted.count("\x1b[0m") == 1
     assert painted.startswith("\x1b[")
     assert _Palette(enabled=False).alert("ВНИМАНИЕ") == "ВНИМАНИЕ"
+
+
+def test_plain_console_can_be_forced():
+    """Должен быть способ обойти prompt_toolkit, не удаляя пакет."""
+    from p2pchat.ui.console import Console as _Console
+    from p2pchat.ui.console import PromptToolkitConsole, build_console
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trust = TrustStore.load(Path(tmp) / "known.json")
+        mesh = FakeMesh(Identity.generate("alice"))
+        console = build_console(mesh, trust, Palette(enabled=False), plain=True)
+        assert type(console) is _Console
+        assert not isinstance(console, PromptToolkitConsole)
+
+
+def test_prompt_toolkit_console_does_not_print_raw_ansi():
+    """Регрессия: patch_stdout заменял \\x1b на «?», и цвет превращался в мусор.
+
+    Библиотеки здесь нет, поэтому проверяем то, что можно проверить без неё:
+    класс обязан переопределять _write, а не наследовать печать через print.
+    """
+    from p2pchat.ui.console import Console as _Console
+    from p2pchat.ui.console import PromptToolkitConsole
+
+    assert PromptToolkitConsole._write is not _Console._write
+    source = inspect.getsource(PromptToolkitConsole._write)
+    assert "self._print" in source and "self._ansi" in source
