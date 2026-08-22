@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from enum import Enum
 from random import Random
 
+from ..format import panel
 from .api import Action, Finish, GameError, Say, Whisper
 
 NIGHT_TIMEOUT = 120.0
@@ -41,11 +42,19 @@ class Phase(Enum):
 
 
 class Mafia:
-    name = "мафия"
+    name = "mafia"
     title = "Мафия"
     min_players = 4
     max_players = 8
-    verbs = frozenset({"убить", "проверить", "голос", "статус", "день"})
+    verbs = frozenset({"kill", "check", "vote", "status", "day"})
+    aliases = {
+        "убить": "kill",
+        "проверить": "check",
+        "голос": "vote",
+        "голосую": "vote",
+        "статус": "status",
+        "день": "day",
+    }
 
     def __init__(self, rng: Random) -> None:
         self._rng = rng
@@ -82,7 +91,7 @@ class Mafia:
             Say(
                 f"Партия на {len(players)}: мафии {mafia_count}, комиссар один, "
                 "остальные мирные.\n"
-                "Ночные ходы пишите боту ЛИЧНО: /w <ник бота> !убить <ник>\n"
+                "Ночные ходы пишите боту ЛИЧНО: /w <ник бота> !kill <ник>\n"
                 "Если написать то же самое в общий чат — ход увидят все."
             )
         ]
@@ -92,18 +101,18 @@ class Mafia:
         return actions
 
     def handle(self, player: str, verb: str, rest: str) -> list[Action]:
-        if verb == "статус":
+        if verb == "status":
             return [Whisper(player, self.snapshot_for(player))]
         if self.finished:
             raise GameError("партия окончена")
         if player not in self.alive:
             raise GameError("мёртвые не участвуют")
 
-        if verb == "убить":
+        if verb == "kill":
             return self._night_kill(player, rest)
-        if verb == "проверить":
+        if verb == "check":
             return self._night_check(player, rest)
-        if verb == "день":
+        if verb == "day":
             return self._open_vote(player)
         return self._vote(player, rest)
 
@@ -150,9 +159,13 @@ class Mafia:
         self._checked_this_night = False
         self.deadline = time.monotonic() + NIGHT_TIMEOUT
         return Say(
-            f"— Ночь {self.round}. Город засыпает. Живых: {len(self.alive)} "
-            f"({', '.join(self.alive)})\n"
-            "Мафия: !убить <ник>. Комиссар: !проверить <ник>. Только личным сообщением боту."
+            panel(
+                f"живые: {', '.join(self.alive)}\n"
+                "мафия: !kill <ник>   комиссар: !check <ник>\n"
+                "только личным сообщением боту",
+                title=f"Ночь {self.round}",
+                footer="город засыпает",
+            )
         )
 
     def _night_kill(self, player: str, rest: str) -> list[Action]:
@@ -214,8 +227,12 @@ class Mafia:
         self.deadline = time.monotonic() + DAY_TIMEOUT
         actions.append(
             Say(
-                f"День {self.round}. Живые: {', '.join(self.alive)}\n"
-                "Обсуждайте. Когда готовы — !день, чтобы перейти к голосованию."
+                panel(
+                    f"живые: {', '.join(self.alive)}\n"
+                    "обсуждайте; когда готовы — !day для голосования",
+                    title=f"День {self.round}",
+                    footer="город просыпается",
+                )
             )
         )
         return actions
@@ -233,7 +250,7 @@ class Mafia:
 
     def _vote(self, player: str, rest: str) -> list[Action]:
         if self.phase is not Phase.VOTE:
-            raise GameError("голосование ещё не открыто (!день)")
+            raise GameError("голосование ещё не открыто (!day)")
         target = self._target(rest)
         self._votes[player] = target
         actions: list[Action] = [Say(f"{player} голосует против {target} "
@@ -291,11 +308,11 @@ class Mafia:
         role = self.roles.get(player, "зритель")
         if role == MAFIA:
             partners = [p for p, r in self.roles.items() if r == MAFIA and p != player]
-            tail = f" Ваши: {', '.join(partners)}." if partners else " Вы одни."
-            return f"Ваша роль: МАФИЯ.{tail}"
+            tail = f"ваши: {', '.join(partners)}" if partners else "вы одни"
+            return panel(f"МАФИЯ\n{tail}\nночью: !kill <ник>", title="Ваша роль")
         if role == DETECTIVE:
-            return "Ваша роль: КОМИССАР. Ночью можно проверить одного: !проверить <ник>"
-        return "Ваша роль: мирный житель. Ночью спите, днём разбирайтесь."
+            return panel("КОМИССАР\nночью можно проверить одного: !check <ник>", title="Ваша роль")
+        return panel("мирный житель\nночью спите, днём разбирайтесь", title="Ваша роль")
 
     def _target(self, rest: str) -> str:
         name = rest.strip()

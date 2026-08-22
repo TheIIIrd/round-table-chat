@@ -23,6 +23,7 @@ registry = Registry()
     "roll",
     pattern=r"(\d{1,2})?d(\d{1,4})\s*([+-]\s*\d{1,4})?",
     help="бросок кубиков, например !roll d20 или !roll 3d6+2",
+    aliases=("бросок", "кубик", "кинь"),
 )
 def roll(ctx: Context, count: str | None, sides: str, modifier: str | None) -> str:
     number = int(count) if count else 1
@@ -44,7 +45,7 @@ def roll(ctx: Context, count: str | None, sides: str, modifier: str | None) -> s
     return f"{ctx.nick} бросает {notation}: [{detail}]{tail} = {total}"
 
 
-@registry.command("coin", help="подбросить монету")
+@registry.command("coin", help="подбросить монету", aliases=("монета", "монетка"))
 def coin(ctx: Context) -> str:
     return f"{ctx.nick} подбрасывает монету: {'орёл' if secrets.randbelow(2) else 'решка'}"
 
@@ -53,6 +54,7 @@ def coin(ctx: Context) -> str:
     "choose",
     pattern=r"(.{1,150})",
     help="выбрать из вариантов через запятую: !choose пицца, суши, паста",
+    aliases=("выбери", "выбор"),
 )
 def choose(ctx: Context, raw: str) -> str:
     options = [item.strip() for item in raw.split(",") if item.strip()]
@@ -61,10 +63,11 @@ def choose(ctx: Context, raw: str) -> str:
     return f"{ctx.nick}: {options[secrets.randbelow(len(options))]}"
 
 
-@registry.command("help", help="список команд")
+@registry.command("help", help="список команд", aliases=("помощь", "справка"))
 def help_command(ctx: Context) -> str:
     return (
         "Команды бота:\n"
         + "\n".join(registry.help_lines())
         + "\nИгры: !game — список, !join, !start, !leave, !stop, !who"
+        + "\nКоманды понимают и русские названия — список в README."
     )

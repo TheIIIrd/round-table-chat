@@ -15,6 +15,7 @@ from p2pchat.crypto.identity import Identity
 from p2pchat.proto import events as ev
 from p2pchat.proto.trust import TrustStore
 from p2pchat.ui.console import Console
+from p2pchat.ui.style import Palette
 
 
 class FakeMesh:
@@ -131,8 +132,8 @@ def test_unverified_peer_is_marked_on_every_line():
 
         asyncio.run(scenario())
 
-        assert console_output[0] == "!<bob> первое"  # ещё не сверен
-        assert console_output[1] == "<bob> второе"  # после /verify метки нет
+        assert console_output[0] == "?bob: первое"  # ещё не сверен
+        assert console_output[1] == "bob: второе"  # после /verify метки нет
 
 
 def test_plain_text_goes_to_chat():
@@ -146,3 +147,57 @@ def test_plain_text_goes_to_chat():
 
         asyncio.run(scenario())
         assert mesh.broadcasts == ["обычное сообщение"]
+
+
+# --- цвет ------------------------------------------------------------------------
+
+
+def test_color_is_disabled_without_terminal(monkeypatch):
+    from p2pchat.ui.style import build_palette, supports_color
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert supports_color() is False
+
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("TERM", "dumb")
+    assert supports_color() is False
+
+    assert build_palette(False).red("текст") == "текст"
+
+
+def test_nick_color_follows_key_not_name():
+    """Цвет привязан к ключу: подделать чужой, взяв его ник, не выйдет."""
+    from p2pchat.ui.style import Palette
+
+    palette = Palette(enabled=True)
+    key_a, key_b = b"\x01" * 32, b"\x02" * 32
+    assert palette.nick("bob", key_a) != palette.nick("bob", key_b)
+    assert palette.nick("bob", key_a) == palette.nick("bob", key_a)
+    assert "bob" in palette.nick("bob", key_a)
+
+
+def test_incoming_text_cannot_drive_the_terminal():
+    """Чужое сообщение не должно чистить экран и двигать курсор."""
+    with tempfile.TemporaryDirectory() as tmp:
+        console_output.clear()
+        console, mesh, trust = build(Path(tmp))
+        peer = Identity.generate("bob").public
+        trust.remember("bob", peer, verified=True)
+
+        hostile = "\x1b[2Jочистка\x1b]0;чужой заголовок\x07\x00"
+        line = console._decorate(
+            ev.TextMessage(nick="bob", public=peer, text=hostile, lamport=1)
+        )
+        assert "\x1b[2J" not in line
+        assert "\x07" not in line and "\x00" not in line
+        assert "очистка" in line
+
+
+def test_bot_lines_are_marked_even_without_color():
+    with tempfile.TemporaryDirectory() as tmp:
+        console, _, _ = build(Path(tmp))
+        line = console._decorate(
+            ev.TextMessage(nick="dice", public=b"\x03" * 32, text="строка\nвторая", lamport=1, is_bot=True)
+        )
+        assert line.split("\n") == ["┃ строка", "┃ вторая"]

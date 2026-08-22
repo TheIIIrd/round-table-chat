@@ -27,6 +27,7 @@ from .proto.mesh import Mesh
 from .proto.roster import Member, Roster, RosterError
 from .proto.trust import TrustStore
 from .ui.console import build_console
+from .ui.style import build_palette
 
 DEFAULT_HOME = Path(os.environ.get("P2PCHAT_HOME", Path.home() / ".p2pchat"))
 
@@ -47,6 +48,11 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="p2pchat", description="Безопасный консольный P2P-чат")
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME, help="каталог с ключом и данными")
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="вывод без цвета (то же делает переменная NO_COLOR)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     keygen = sub.add_parser("keygen", help="создать долговременный ключ")
@@ -278,7 +284,7 @@ def cmd_chat(args) -> int:
         listen=listen,
         discover_lan=args.discover == "lan",
     )
-    console = build_console(mesh, trust)
+    console = build_console(mesh, trust, build_palette(False if args.no_color else None))
 
     async def run() -> None:
         if args.direct:

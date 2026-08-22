@@ -198,3 +198,65 @@ def test_home_directory_is_isolated(tmp_path, monkeypatch):
     assert Identity.load(first / "id.key", "пассфраза-достаточная").public != Identity.load(
         second / "id.key", "пассфраза-достаточная"
     ).public
+
+
+# --- двуязычные команды ---------------------------------------------------------
+
+
+def test_console_aliases_map_to_english():
+    from p2pchat.ui.console import ALIASES, HELP
+
+    assert ALIASES["кто"] == "peers"
+    assert ALIASES["выход"] == "quit"
+    assert ALIASES["лично"] == "w"
+    # Подсказка остаётся английской: перечислять по два имени на команду —
+    # значит удвоить справку ради тех, кто и так угадает.
+    for alias in ALIASES:
+        assert f"/{alias}" not in HELP
+
+
+def test_bot_command_aliases():
+    from p2pchat.bot.commands import registry
+
+    assert registry.resolve("бросок") == "roll"
+    assert registry.resolve("ROLL") == "roll"
+    assert registry.resolve("монета") == "coin"
+    assert registry.resolve("несуществующая") is None
+    # В подсказке только канонические имена.
+    lines = "\n".join(registry.help_lines())
+    assert all("!" + name in lines for name in registry.names)
+    assert "!бросок" not in lines and "!монета" not in lines
+
+
+def test_game_and_verb_aliases():
+    from random import Random
+
+    from p2pchat.games import build_host
+    from p2pchat.games.lobby import GAME_ALIASES
+
+    assert GAME_ALIASES["дурак"] == "durak"
+    for russian, english in GAME_ALIASES.items():
+        host = build_host(Random(0))
+        assert "собирает игру" in "".join(
+            getattr(a, "text", "") for a in host.dispatch("alice", "игра", russian)
+        ), f"«{russian}» должно открывать {english}"
+
+    host = build_host(Random(0))
+    host.dispatch("alice", "game", "durak")
+    host.dispatch("bob", "join", "")
+    host.dispatch("alice", "start", "")
+    assert host.resolve("ход") == "attack"
+    assert host.resolve("attack") == "attack"
+    assert host.resolve("несуществующая") is None
+
+
+def test_every_game_verb_has_english_canonical_form():
+    """Канон — английский; русские слова живут только в aliases."""
+    from p2pchat.games import CATALOG
+
+    for name, game_class in CATALOG.items():
+        assert name.isascii(), f"имя игры {name} должно быть латиницей"
+        for verb in game_class.verbs:
+            assert verb.isascii(), f"{name}: команда «{verb}» должна быть латиницей"
+        for alias, target in getattr(game_class, "aliases", {}).items():
+            assert target in game_class.verbs, f"{name}: синоним «{alias}» ведёт в никуда"

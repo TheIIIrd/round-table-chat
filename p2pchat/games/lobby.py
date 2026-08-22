@@ -20,10 +20,28 @@ from dataclasses import dataclass, field
 from enum import Enum
 from random import Random
 
-from .api import Action, Finish, Game, GameError, Say, Whisper, shuffled
+from .api import Action, Finish, Game, GameError, Say, Whisper, canonical, shuffled
 
 GATHER_TIMEOUT = 180.0
 LOBBY_VERBS = frozenset({"game", "join", "leave", "start", "stop", "who"})
+LOBBY_ALIASES = {
+    "игра": "game",
+    "игры": "game",
+    "войти": "join",
+    "выйти": "leave",
+    "начать": "start",
+    "стоп": "stop",
+    "прервать": "stop",
+    "кто": "who",
+}
+
+GAME_ALIASES = {
+    "дурак": "durak",
+    "мафия": "mafia",
+    "виселица": "hangman",
+    "четыре": "c4",
+    "четыревряд": "c4",
+}
 
 GameFactory = Callable[[Random], Game]
 
@@ -52,13 +70,21 @@ class GameHost:
 
     # --- маршрутизация --------------------------------------------------------
 
+    def resolve(self, verb: str) -> str | None:
+        """Каноническая форма команды или ``None``, если она не наша."""
+        lobby = canonical(verb, LOBBY_VERBS, LOBBY_ALIASES)
+        if lobby is not None:
+            return lobby
+        if self.game is None:
+            return None
+        return canonical(verb, self.game.verbs, getattr(self.game, "aliases", {}))
+
     def owns(self, verb: str) -> bool:
-        if verb in LOBBY_VERBS:
-            return True
-        return self.game is not None and verb in self.game.verbs
+        return self.resolve(verb) is not None
 
     def dispatch(self, player: str, verb: str, rest: str, now: float | None = None) -> list[Action]:
         now = time.monotonic() if now is None else now
+        verb = self.resolve(verb) or verb.lower()
         try:
             if verb in LOBBY_VERBS:
                 return self._lobby(player, verb, rest.strip(), now)
@@ -95,14 +121,14 @@ class GameHost:
         if self.phase is not Phase.IDLE:
             return [Say(f"{player}: уже идёт «{self._current_title()}». Сначала !stop.")]
 
-        factory = self.catalog.get(name.lower())
+        factory = self.catalog.get(GAME_ALIASES.get(name.lower(), name.lower()))
         if factory is None:
             return [Say(f"{player}: игра «{name}» неизвестна. !game покажет список.")]
 
         probe = factory(Random(0))
         self.phase = Phase.GATHERING
         self.pending = factory
-        self.pending_name = name.lower()
+        self.pending_name = GAME_ALIASES.get(name.lower(), name.lower())
         self.players = [player]
         self.opener = player
         self.opened_at = now

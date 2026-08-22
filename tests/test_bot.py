@@ -155,7 +155,7 @@ def test_bot_answers_in_group():
             assert answer.nick == "dice" and answer.is_bot
             value = int(answer.text.rsplit(":", 1)[1])
             assert 1 <= value <= 20
-            assert answer.render().startswith("<dice🤖>")
+            assert answer.render().startswith("┃ ")  # реплики бота выделяются полосой
         finally:
             bot_task.cancel()
             await mesh.stop()

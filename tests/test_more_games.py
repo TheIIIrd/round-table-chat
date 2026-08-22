@@ -95,8 +95,8 @@ def test_durak_first_attacker_has_lowest_trump():
 
 
 def test_durak_hands_are_private():
-    host = open_game("дурак", ["alice", "bob"])
-    start = host.dispatch("alice", "рука", "")
+    host = open_game("durak", ["alice", "bob"])
+    start = host.dispatch("alice", "hand", "")
     assert len(start) == 1 and isinstance(start[0], Whisper)
     assert start[0].player == "alice"
 
@@ -107,14 +107,14 @@ def test_durak_rejects_illegal_moves():
     attacker, defender = game._attacker(), game._defender()
 
     with pytest.raises(GameError):
-        game.handle(defender, "ход", str(game.hands[defender][0]))  # не его очередь
+        game.handle(defender, "attack", str(game.hands[defender][0]))  # не его очередь
     with pytest.raises(GameError):
-        game.handle(attacker, "ход", "7щ")  # мусор вместо карты
+        game.handle(attacker, "attack", "7щ")  # мусор вместо карты
     foreign = next(card for card in game.hands[defender] if card not in game.hands[attacker])
     with pytest.raises(GameError):
-        game.handle(attacker, "ход", str(foreign))  # чужая карта
+        game.handle(attacker, "attack", str(foreign))  # чужая карта
     with pytest.raises(GameError):
-        game.handle(attacker, "пас", "")  # пасовать нечего
+        game.handle(attacker, "pass", "")  # пасовать нечего
 
 
 def test_durak_defence_requires_stronger_card():
@@ -122,7 +122,7 @@ def test_durak_defence_requires_stronger_card():
     game.start(("alice", "bob"))
     attacker, defender = game._attacker(), game._defender()
     attack_card = min(game.hands[attacker], key=lambda c: (c.suit == game.trump, c.value()))
-    game.handle(attacker, "ход", str(attack_card))
+    game.handle(attacker, "attack", str(attack_card))
 
     weak = [
         card
@@ -131,7 +131,7 @@ def test_durak_defence_requires_stronger_card():
     ]
     if weak:
         with pytest.raises(GameError):
-            game.handle(defender, "бить", f"{weak[0]} {attack_card}")
+            game.handle(defender, "beat", f"{weak[0]} {attack_card}")
 
 
 def test_durak_take_moves_cards_to_hand():
@@ -139,8 +139,8 @@ def test_durak_take_moves_cards_to_hand():
     game.start(("alice", "bob"))
     attacker, defender = game._attacker(), game._defender()
     before = len(game.hands[defender])
-    game.handle(attacker, "ход", str(game.hands[attacker][0]))
-    game.handle(defender, "взять", "")
+    game.handle(attacker, "attack", str(game.hands[attacker][0]))
+    game.handle(defender, "take", "")
     assert len(game.hands[defender]) >= before + 1
 
 
@@ -150,47 +150,47 @@ def test_durak_only_matching_rank_can_be_added():
     attacker = game._attacker()
     third = next(p for p in game.order if p not in (attacker, game._defender()))
     laid = game.hands[attacker][0]
-    game.handle(attacker, "ход", str(laid))
+    game.handle(attacker, "attack", str(laid))
 
     mismatched = [card for card in game.hands[third] if card.rank != laid.rank]
     if mismatched:
         with pytest.raises(GameError):
-            game.handle(third, "подкинуть", str(mismatched[0]))
+            game.handle(third, "add", str(mismatched[0]))
 
 
 def test_durak_full_game_terminates():
     """Два простейших автоигрока доводят партию до конца без зависаний."""
-    host = open_game("дурак", ["alice", "bob"], seed=11)
+    host = open_game("durak", ["alice", "bob"], seed=11)
     game = host.game
     for _ in range(500):
         if host.game is None or game.finished:
             break
         attacker, defender = game._attacker(), game._defender()
         if not game.table:
-            host.dispatch(attacker, "ход", str(game.hands[attacker][0]))
+            host.dispatch(attacker, "attack", str(game.hands[attacker][0]))
             continue
         undefended = [laid for laid, beat in game.table if beat is None]
         if undefended:
             target = undefended[0]
             beats = [c for c in game.hands[defender] if c.beats(target, game.trump)]
             if beats:
-                host.dispatch(defender, "бить", f"{beats[0]} {target}")
+                host.dispatch(defender, "beat", f"{beats[0]} {target}")
             else:
-                host.dispatch(defender, "взять", "")
+                host.dispatch(defender, "take", "")
         else:
-            host.dispatch(attacker, "пас", "")
+            host.dispatch(attacker, "pass", "")
     assert game.finished is True
     assert host.phase is Phase.IDLE
 
 
 def test_durak_leaving_ends_two_player_game():
-    host = open_game("дурак", ["alice", "bob"])
+    host = open_game("durak", ["alice", "bob"])
     result = host.on_peer_lost("alice")
     assert any(isinstance(action, Finish) for action in result)
 
 
 def test_durak_snapshot_shows_hand_and_table():
-    host = open_game("дурак", ["alice", "bob"])
+    host = open_game("durak", ["alice", "bob"])
     body = texts(host.on_peer_back("alice"))
     assert "Ваша рука" in body and "Стол" in body
 
@@ -199,7 +199,7 @@ def test_durak_snapshot_shows_hand_and_table():
 
 
 def test_mafia_assigns_roles_privately():
-    host = open_game("мафия", ["alice", "bob", "carol", "dave"], seed=3)
+    host = open_game("mafia", ["alice", "bob", "carol", "dave"], seed=3)
     game = host.game
     assert sorted(game.roles) == ["alice", "bob", "carol", "dave"]
     assert list(game.roles.values()).count(MAFIA) == 1
@@ -231,11 +231,11 @@ def test_mafia_only_mafia_kills_and_not_their_own():
     civilian = next(p for p, r in game.roles.items() if r == CIVILIAN)
 
     with pytest.raises(GameError):
-        game.handle(civilian, "убить", mafia)  # не его ход
+        game.handle(civilian, "kill", mafia)  # не его ход
     with pytest.raises(GameError):
-        game.handle(mafia, "убить", mafia)  # свой
+        game.handle(mafia, "kill", mafia)  # свой
     with pytest.raises(GameError):
-        game.handle(mafia, "убить", "несуществующий")
+        game.handle(mafia, "kill", "несуществующий")
 
 
 def test_mafia_detective_learns_truth():
@@ -244,10 +244,10 @@ def test_mafia_detective_learns_truth():
     mafia = next(p for p, r in game.roles.items() if r == MAFIA)
     detective = next(p for p, r in game.roles.items() if r == DETECTIVE)
 
-    result = game.handle(detective, "проверить", mafia)
+    result = game.handle(detective, "check", mafia)
     assert whispers(result, detective).endswith("мафия.")
     with pytest.raises(GameError):
-        game.handle(detective, "проверить", mafia)  # вторая проверка за ночь
+        game.handle(detective, "check", mafia)  # вторая проверка за ночь
 
 
 def test_mafia_night_resolves_when_everyone_moved():
@@ -257,26 +257,26 @@ def test_mafia_night_resolves_when_everyone_moved():
     detective = next(p for p, r in game.roles.items() if r == DETECTIVE)
     victim = next(p for p in game.alive if p not in (mafia, detective))
 
-    game.handle(mafia, "убить", victim)
-    result = game.handle(detective, "проверить", mafia)
+    game.handle(mafia, "kill", victim)
+    result = game.handle(detective, "check", mafia)
     assert "Рассвет" in texts(result)
     assert victim not in game.alive
     assert game.phase is MafiaPhase.DAY
 
 
 def test_mafia_city_wins_by_vote():
-    host = open_game("мафия", ["alice", "bob", "carol", "dave"], seed=3)
+    host = open_game("mafia", ["alice", "bob", "carol", "dave"], seed=3)
     game = host.game
     mafia = next(p for p, r in game.roles.items() if r == MAFIA)
     detective = next(p for p, r in game.roles.items() if r == DETECTIVE)
     victim = next(p for p in game.alive if p not in (mafia, detective))
 
-    host.dispatch(mafia, "убить", victim)
-    host.dispatch(detective, "проверить", mafia)
-    host.dispatch(detective, "день", "")
+    host.dispatch(mafia, "kill", victim)
+    host.dispatch(detective, "check", mafia)
+    host.dispatch(detective, "day", "")
     result = []
     for voter in list(game.alive):
-        result = host.dispatch(voter, "голос", mafia)
+        result = host.dispatch(voter, "vote", mafia)
         if host.phase is Phase.IDLE:
             break
     assert "победа города" in texts(result)
@@ -310,11 +310,11 @@ def test_mafia_dead_cannot_act():
     dead = game.alive[0]
     game.alive.remove(dead)
     with pytest.raises(GameError):
-        game.handle(dead, "голос", game.alive[0])
+        game.handle(dead, "vote", game.alive[0])
 
 
 def test_mafia_snapshot_keeps_role():
-    host = open_game("мафия", ["alice", "bob", "carol", "dave"], seed=3)
+    host = open_game("mafia", ["alice", "bob", "carol", "dave"], seed=3)
     body = texts(host.on_peer_back("alice"))
     assert "роль" in body.lower() and "Живые" in body
 
@@ -333,7 +333,7 @@ def test_hangman_reveals_letters():
     game.secret = "телескоп"
     game.opened.clear()
 
-    result = game.handle("alice", "буква", "е")
+    result = game.handle("alice", "letter", "е")
     assert "есть" in texts(result)
     assert game.masked() == "_ е _ е _ _ _ _"
 
@@ -347,7 +347,7 @@ def test_hangman_counts_mistakes_and_loses():
 
     result = []
     for letter in "бвгдежз":
-        result = game.handle("alice", "буква", letter)
+        result = game.handle("alice", "letter", letter)
     assert any(isinstance(action, Finish) for action in result)
     assert "маяк" in texts(result)
 
@@ -359,27 +359,27 @@ def test_hangman_rejects_repeats_and_nonletters():
     game.opened.clear()
     game.wrong.clear()
 
-    game.handle("alice", "буква", "м")
+    game.handle("alice", "letter", "м")
     for bad in ("м", "", "аб", "5", " "):
         with pytest.raises(GameError):
-            game.handle("alice", "буква", bad)
+            game.handle("alice", "letter", bad)
 
 
 def test_hangman_whole_word_guess():
     game = Hangman(Random(0))
     game.start(("bob",))
     game.secret = "гитара"
-    result = game.handle("bob", "слово", "  ГИТАРА ")
+    result = game.handle("bob", "word", "  ГИТАРА ")
     assert any(isinstance(action, Finish) for action in result)
     assert "bob" in texts(result)
 
 
 def test_hangman_is_cooperative_without_turn_order():
-    host = open_game("виселица", ["alice", "bob", "carol"])
+    host = open_game("hangman", ["alice", "bob", "carol"])
     host.game.secret = "остров"
     host.game.opened.clear()
-    assert "есть" in texts(host.dispatch("carol", "буква", "о"))
-    assert "есть" in texts(host.dispatch("bob", "буква", "с"))
+    assert "есть" in texts(host.dispatch("carol", "letter", "о"))
+    assert "есть" in texts(host.dispatch("bob", "letter", "с"))
 
 
 def test_hangman_yo_is_treated_as_e():
@@ -387,6 +387,6 @@ def test_hangman_yo_is_treated_as_e():
     game.start(("alice",))
     game.secret = "вертолёт"
     game.opened.clear()
-    game.handle("alice", "буква", "е")
+    game.handle("alice", "letter", "е")
     assert "ё" in game.opened or "е" in game.opened
     assert "_" in game.masked()

@@ -14,6 +14,7 @@ import time
 from collections.abc import Sequence
 from random import Random
 
+from ..format import panel
 from .api import Action, Finish, GameError, Say, Whisper
 
 COLUMNS = 7
@@ -34,6 +35,7 @@ class ConnectFour:
     min_players = 2
     max_players = 2
     verbs = frozenset({"drop", "board"})
+    aliases = {"ход": "drop", "ходи": "drop", "доска": "board"}
 
     def __init__(self, rng: Random) -> None:
         self._rng = rng
@@ -52,16 +54,15 @@ class ConnectFour:
         self._arm(time.monotonic())
         return [
             Say(
-                f"{self.players[0]} {TOKENS[0]} против {self.players[1]} {TOKENS[1]}.\n"
-                f"Ход: !drop <столбец 1–{COLUMNS}>, посмотреть доску: !board\n"
-                + self.render()
-                + f"\nХодит {self._current()}."
+                f"{self.players[0]} {TOKENS[0]} против {self.players[1]} {TOKENS[1]}\n"
+                f"Ход: !drop <столбец 1–{COLUMNS}>, доска: !board\n"
+                + self.render(footer=f"ходит {self._current()}")
             )
         ]
 
     def handle(self, player: str, verb: str, rest: str) -> list[Action]:
         if verb == "board":
-            return [Whisper(player, self.render() + f"\nХодит {self._current()}.")]
+            return [Whisper(player, self.render(footer=f"ходит {self._current()}"))]
 
         if self.finished:
             raise GameError("партия уже окончена")
@@ -75,14 +76,14 @@ class ConnectFour:
         if self._wins(row, column, self.turn):
             self.finished = True
             return [
-                Say(f"{player} ставит в столбец {column + 1}.\n" + self.render()),
+                Say(self.render(footer=f"{player} — победа")),
                 Finish(f"{player} собрал четыре в ряд. Поздравляем!"),
             ]
 
         if self.moves == ROWS * COLUMNS:
             self.finished = True
             return [
-                Say(f"{player} ставит в столбец {column + 1}.\n" + self.render()),
+                Say(self.render(footer="ничья")),
                 Finish("Доска заполнена — ничья."),
             ]
 
@@ -90,9 +91,8 @@ class ConnectFour:
         self._arm(time.monotonic())
         return [
             Say(
-                f"{player} ставит в столбец {column + 1}.\n"
-                + self.render()
-                + f"\nХодит {self._current()}."
+                f"{player} → столбец {column + 1}\n"
+                + self.render(footer=f"ходит {self._current()}")
             )
         ]
 
@@ -121,16 +121,21 @@ class ConnectFour:
         if not self.players:
             return ""
         token = TOKENS[self.players.index(player)] if player in self.players else "—"
-        return f"Вы играете {token}.\n{self.render()}\nХодит {self._current()}."
+        return f"Вы играете {token}.\n" + self.render(footer=f"ходит {self._current()}")
 
     # --- правила --------------------------------------------------------------
 
-    def render(self) -> str:
+    def render(self, footer: str = "") -> str:
+        """Доска в рамке.
+
+        Рамка, а не цвет: она отделяет доску от потока реплик в любом
+        терминале и переживает копирование в другой чат.
+        """
         header = " ".join(str(index + 1) for index in range(COLUMNS))
         rows = [
             " ".join(EMPTY if cell is None else TOKENS[cell] for cell in row) for row in self.board
         ]
-        return "\n".join([header, *rows])
+        return panel("\n".join([*rows, header]), title=self.title, footer=footer)
 
     def _parse_column(self, rest: str) -> int:
         text = rest.strip()

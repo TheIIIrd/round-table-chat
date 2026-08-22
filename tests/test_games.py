@@ -231,7 +231,7 @@ def test_reconnect_restores_private_state():
     actions = h.on_peer_back(returning)
     assert len(actions) == 1 and isinstance(actions[0], Whisper)
     body = actions[0].text
-    assert "Вы играете" in body and "Ходит" in body
+    assert "Вы играете" in body and "ходит" in body
 
     assert h.on_peer_back("carol") == []  # не участник — нечего восстанавливать
 

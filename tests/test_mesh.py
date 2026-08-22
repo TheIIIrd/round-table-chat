@@ -256,3 +256,72 @@ def _run(scenario):
 
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(scenario(Path(tmp)))
+
+
+def test_duplicate_connection_does_not_evict_the_live_one():
+    """Регрессия: закрытие лишней сессии выносило из таблицы живую.
+
+    Проявлялось в живом чате как «участник исчез из /peers, хотя он на связи»:
+    при одновременном дозвоне обе стороны создавали по сессии, лишнюю закрывали,
+    а уборка удаляла запись по ключу пира, не проверяя, та ли это сессия.
+    """
+
+    async def scenario(tmp_path):
+        meshes, _, _ = await build_group(tmp_path, ["alice", "bob"])
+        try:
+            for mesh in meshes.values():
+                await wait_connected(mesh, 1)
+
+            alice, bob = meshes["alice"], meshes["bob"]
+            live = alice._connections[bob.identity.public].session
+
+            # Второе соединение к тому же пиру — как при гонке дозвонов.
+            host, port = alice.listen
+            from p2pchat.net.tcp import TcpLink
+            from p2pchat.proto.session import Session
+
+            link = await TcpLink.connect(host, port)
+            duplicate = await Session.initiate(
+                link, bob.identity, prologue=bob.prologue, payload=b"bob"
+            )
+            await asyncio.sleep(0.2)
+            await duplicate.close()
+            await asyncio.sleep(0.3)
+
+            assert alice.peers == ["bob"], "живое соединение не должно исчезать"
+            assert alice._connections[bob.identity.public].session is live
+        finally:
+            for mesh in meshes.values():
+                await mesh.stop()
+
+    _run(scenario)
+
+
+def test_disconnect_reported_once_per_peer():
+    async def scenario(tmp_path):
+        meshes, _, _ = await build_group(tmp_path, ["alice", "bob"])
+        try:
+            for mesh in meshes.values():
+                await wait_connected(mesh, 1)
+            await meshes["bob"].stop()
+            await wait_for(meshes["alice"], ev.PeerDisconnected)
+            await asyncio.sleep(0.3)
+
+            extra = [
+                event
+                for event in _drain(meshes["alice"])
+                if isinstance(event, ev.PeerDisconnected)
+            ]
+            assert extra == []
+        finally:
+            for mesh in meshes.values():
+                await mesh.stop()
+
+    _run(scenario)
+
+
+def _drain(mesh):
+    collected = []
+    while not mesh.events.empty():
+        collected.append(mesh.events.get_nowait())
+    return collected

@@ -101,6 +101,7 @@ class Mesh:
         self._server: asyncio.Server | None = None
         self._discovery: Discovery | None = None
         self._discovered: dict[bytes, tuple[str, int]] = {}
+        self._dialing: set[bytes] = set()
         self._running = False
 
     # --- жизненный цикл -------------------------------------------------------
@@ -233,12 +234,13 @@ class Mesh:
                 if self._should_dial(member)
             ]
             for member in expected:
-                if member.public in self._connections:
-                    continue
+                if member.public in self._connections or member.public in self._dialing:
+                    continue  # звонок уже в пути: второй создал бы дубликат
                 candidate = self._candidate_address(member)
                 if candidate is None:
                     continue
                 host, port = candidate
+                self._dialing.add(member.public)
                 try:
                     link = await TcpLink.connect(host, port)
                     session = await Session.initiate(
@@ -249,6 +251,8 @@ class Mesh:
                     )
                 except Exception:  # noqa: BLE001 — пир просто ещё не поднялся
                     continue
+                finally:
+                    self._dialing.discard(member.public)
                 self.trust.remember_address(member.public, host, port)
                 await self._register(session, dialed=True)
 
@@ -350,6 +354,12 @@ class Mesh:
     # --- приём ---------------------------------------------------------------
 
     async def _read_peer(self, member: Member, session: Session) -> None:
+        """Читает сообщения пира до обрыва.
+
+        В конце убирает из таблицы ИМЕННО СВОЮ сессию. Раньше запись удалялась
+        по ключу пира: при гонке дубликатов закрытие лишнего соединения выносило
+        из таблицы живое, и участник пропадал из чата, продолжая быть на связи.
+        """
         reason = "соединение закрыто"
         try:
             while True:
@@ -368,10 +378,14 @@ class Mesh:
         except Exception as exc:  # noqa: BLE001
             reason = f"ошибка: {exc}"
         finally:
-            self._connections.pop(member.public, None)
+            current = self._connections.get(member.public)
+            mine = current is not None and current.session is session
+            if mine:
+                self._connections.pop(member.public, None)
             await session.close()
-            self._drop_transfers(member.public)
-            await self._emit(ev.PeerDisconnected(member.nick, reason))
+            if mine:
+                self._drop_transfers(member.public)
+                await self._emit(ev.PeerDisconnected(member.nick, reason))
 
     async def _handle(self, member: Member, session: Session, envelope: Envelope) -> None:
         if envelope.type == TYPE_TEXT:

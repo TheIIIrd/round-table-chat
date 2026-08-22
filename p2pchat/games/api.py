@@ -61,7 +61,8 @@ class Game(Protocol):
     title: str  # человеческое название
     min_players: int
     max_players: int
-    verbs: frozenset[str]  # команды, которые игра берёт на себя
+    verbs: frozenset[str]  # канонические (английские) команды игры
+    aliases: dict[str, str]  # русские синонимы: слово -> каноническая команда
 
     def start(self, players: Sequence[str]) -> list[Action]:
         """Партия начинается. Порядок игроков уже перемешан хозяином."""
@@ -77,6 +78,19 @@ class Game(Protocol):
 
     def snapshot_for(self, player: str) -> str:
         """Что показать игроку, который вернулся после обрыва."""
+
+
+def canonical(verb: str, verbs: frozenset[str], aliases: dict[str, str]) -> str | None:
+    """Приводит команду к канонической форме.
+
+    Английский вариант — основной и единственный, который показывают подсказки.
+    Русский работает молча: человеку, который пишет «!ход», не нужно объяснять,
+    что «на самом деле» команда называется drop.
+    """
+    lowered = verb.lower()
+    if lowered in verbs:
+        return lowered
+    return aliases.get(lowered)
 
 
 class GameError(Exception):

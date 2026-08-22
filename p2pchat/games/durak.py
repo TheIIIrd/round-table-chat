@@ -21,6 +21,7 @@ import time
 from collections.abc import Sequence
 from random import Random
 
+from ..format import panel
 from .api import Action, Finish, GameError, Say, Whisper
 from .cards import Card, CardError, deck36, parse_card, render_hand, sort_hand
 
@@ -30,11 +31,20 @@ TURN_TIMEOUT = 180.0
 
 
 class Durak:
-    name = "дурак"
+    name = "durak"
     title = "Дурак (подкидной)"
     min_players = 2
     max_players = 6
-    verbs = frozenset({"ход", "подкинуть", "бить", "взять", "пас", "стол", "рука"})
+    verbs = frozenset({"attack", "add", "beat", "take", "pass", "table", "hand"})
+    aliases = {
+        "ход": "attack",
+        "подкинуть": "add",
+        "бить": "beat",
+        "взять": "take",
+        "пас": "pass",
+        "стол": "table",
+        "рука": "hand",
+    }
 
     def __init__(self, rng: Random) -> None:
         self._rng = rng
@@ -73,7 +83,7 @@ class Durak:
             Say(
                 f"Козырь: {self.trump_card} ({self.trump}). В колоде {len(self.deck)} карт.\n"
                 f"Ходит {self._attacker()}, отбивается {self._defender()}.\n"
-                "!ход <карта>, !подкинуть <карта>, !бить <своя> <по чужой>, !взять, !пас\n"
+                "!attack <карта>, !add <карта>, !beat <своя> <чужая>, !take, !pass, !hand\n"
                 "Руки видны только вам — и владельцу узла с ботом."
             )
         ]
@@ -81,9 +91,9 @@ class Durak:
         return actions
 
     def handle(self, player: str, verb: str, rest: str) -> list[Action]:
-        if verb == "рука":
+        if verb == "hand":
             return [Whisper(player, self._hand_text(player))]
-        if verb == "стол":
+        if verb == "table":
             return [Whisper(player, self.render_table())]
         if self.finished:
             raise GameError("партия окончена")
@@ -91,11 +101,11 @@ class Durak:
             raise GameError("вы уже вышли из игры")
 
         self._arm()
-        if verb in ("ход", "подкинуть"):
-            return self._attack(player, rest, first=verb == "ход")
-        if verb == "бить":
+        if verb in ("attack", "add"):
+            return self._attack(player, rest, first=verb == "attack")
+        if verb == "beat":
             return self._defend(player, rest)
-        if verb == "взять":
+        if verb == "take":
             return self._take(player)
         return self._pass(player)
 
@@ -127,9 +137,9 @@ class Durak:
         if player == self._defender():
             raise GameError("защищающийся не подкидывает")
         if first and self.table:
-            raise GameError("ход уже сделан, подкидывайте: !подкинуть <карта>")
+            raise GameError("ход уже сделан, подкидывайте: !add <карта>")
         if not first and not self.table:
-            raise GameError("подкидывать нечего — сначала !ход")
+            raise GameError("подкидывать нечего — сначала !attack")
         if first and player != self._attacker():
             raise GameError(f"первым ходит {self._attacker()}")
 
@@ -159,7 +169,7 @@ class Durak:
             raise GameError(f"отбивается {self._defender()}")
         parts = rest.split()
         if len(parts) != 2:
-            raise GameError("формат: !бить <своя карта> <карта на столе>")
+            raise GameError("формат: !beat <своя карта> <карта на столе>")
 
         mine = self._card_from_hand(player, parts[0])
         target = self._parse(parts[1])
@@ -194,7 +204,7 @@ class Durak:
         if not self.table:
             raise GameError("пасовать нечего — ход не сделан")
         if player == self._defender():
-            raise GameError("защищающийся не пасует: !бить или !взять")
+            raise GameError("защищающийся не пасует: !beat или !take")
         if any(beat is None for _, beat in self.table):
             raise GameError(f"{self._defender()} ещё не отбился")
 
@@ -255,18 +265,23 @@ class Durak:
     # --- служебное --------------------------------------------------------------
 
     def render_table(self) -> str:
-        if not self.table:
-            return "Стол пуст."
-        pairs = " | ".join(
-            f"{laid}" + (f" ← {beat}" if beat else " ← ?") for laid, beat in self.table
+        body = (
+            " ".join(f"{laid}/{beat}" if beat else f"{laid}/·" for laid, beat in self.table)
+            if self.table
+            else "(пусто)"
         )
-        return f"Стол: {pairs}   (козырь {self.trump})"
+        return panel(
+            body,
+            title=f"Стол · козырь {self.trump}",
+            footer=f"колода {len(self.deck)}",
+        )
 
     def _hand_text(self, player: str) -> str:
         hand = self.hands.get(player, [])
-        return (
-            f"Ваша рука ({len(hand)}): {render_hand(sort_hand(hand, self.trump))}\n"
-            f"Козырь {self.trump}, в колоде {len(self.deck)}."
+        return panel(
+            render_hand(sort_hand(hand, self.trump)),
+            title=f"Ваша рука ({len(hand)})",
+            footer=f"козырь {self.trump} · колода {len(self.deck)}",
         )
 
     def _active(self) -> list[str]:
