@@ -47,6 +47,15 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="p2pchat", description="Безопасный консольный P2P-чат")
+
+    # Общие флаги принимаются и до подкоманды, и после неё. argparse по
+    # умолчанию требует ставить их первыми, а человек естественно пишет
+    # `p2pchat chat --no-color` — и получает отказ на ровном месте.
+    # SUPPRESS нужен, чтобы значение из подкоманды не затирало заданное раньше.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--home", type=Path, default=argparse.SUPPRESS)
+    common.add_argument("--no-color", action="store_true", default=argparse.SUPPRESS)
+
     parser.add_argument(
         "--home", type=Path, default=DEFAULT_HOME, help="каталог с ключом и данными"
     )
@@ -57,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    keygen = sub.add_parser("keygen", help="создать долговременный ключ")
+    keygen = sub.add_parser("keygen", parents=[common], help="создать долговременный ключ")
     keygen.add_argument("--nick", default=getpass.getuser(), help="ник по умолчанию")
     keygen.add_argument(
         "--key-from-env",
@@ -66,36 +75,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     keygen.set_defaults(handler=cmd_keygen)
 
-    whoami = sub.add_parser("whoami", help="показать свой ключ и отпечаток")
+    whoami = sub.add_parser("whoami", parents=[common], help="показать свой ключ и отпечаток")
     whoami.set_defaults(handler=cmd_whoami)
 
-    roster = sub.add_parser("roster", help="работа с составом группы")
+    roster = sub.add_parser("roster", parents=[common], help="работа с составом группы")
     roster_sub = roster.add_subparsers(dest="action", required=True)
 
-    r_new = roster_sub.add_parser("new", help="создать пустой ростер")
+    r_new = roster_sub.add_parser("new", parents=[common], help="создать пустой ростер")
     r_new.add_argument("name")
     r_new.set_defaults(handler=cmd_roster_new)
 
-    r_add = roster_sub.add_parser("add", help="добавить участника")
+    r_add = roster_sub.add_parser("add", parents=[common], help="добавить участника")
     r_add.add_argument("nick")
     r_add.add_argument("key", help="публичный ключ в hex")
     r_add.add_argument("--address", help="host:port, если участник принимает соединения")
     r_add.add_argument("--bot", action="store_true", help="пометить как бота")
     r_add.set_defaults(handler=cmd_roster_add)
 
-    r_invite = roster_sub.add_parser("add-invite", help="добавить участника из приглашения")
+    r_invite = roster_sub.add_parser("add-invite", parents=[common], help="добавить участника из приглашения")
     r_invite.add_argument("invite", help="строка p2pchat:… или p2pchat-group:…")
     r_invite.set_defaults(handler=cmd_roster_add_invite)
 
-    r_show = roster_sub.add_parser("show", help="показать состав и идентификатор группы")
+    r_show = roster_sub.add_parser("show", parents=[common], help="показать состав и идентификатор группы")
     r_show.set_defaults(handler=cmd_roster_show)
 
-    invite = sub.add_parser("invite", help="показать свою строку-приглашение")
+    invite = sub.add_parser("invite", parents=[common], help="показать свою строку-приглашение")
     invite.add_argument("--address", help="host:port, под которым вас видно снаружи")
     invite.add_argument("--group", action="store_true", help="приглашение со всем ростером")
     invite.set_defaults(handler=cmd_invite)
 
-    chat = sub.add_parser("chat", help="запустить чат")
+    chat = sub.add_parser("chat", parents=[common], help="запустить чат")
     chat.add_argument("--nick", help="ник (по умолчанию из ключа)")
     chat.add_argument("--listen", default="0.0.0.0:9333", help="адрес для входящих, или none")
     chat.add_argument("--direct", help="host:port собеседника для режима один на один")
@@ -112,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat.set_defaults(handler=cmd_chat)
 
-    bot = sub.add_parser("bot", help="запустить бота")
+    bot = sub.add_parser("bot", parents=[common], help="запустить бота")
     bot.add_argument("--nick", default="dice", help="ник бота")
     bot.add_argument("--listen", default="0.0.0.0:9334")
     bot.add_argument("--discover", choices=["lan", "off"], default="off")

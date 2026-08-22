@@ -71,5 +71,18 @@ def _edge(left: str, right: str, label: str, inner: int) -> str:
     return f"{left}─ {label} " + "─" * dashes + right
 
 
+def plural(count: int, one: str, few: str, many: str) -> str:
+    """Русское склонение после числительного: 1 карту, 2 карты, 5 карт."""
+    tail_two = count % 100
+    if 11 <= tail_two <= 14:
+        return many
+    tail = count % 10
+    if tail == 1:
+        return one
+    if 2 <= tail <= 4:
+        return few
+    return many
+
+
 def bullet(text: str) -> str:
     return f"• {text}"

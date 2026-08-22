@@ -48,11 +48,17 @@ class FakeMesh:
         self.connects.append((host, port))
 
 
-def build(tmp: Path):
+def build(tmp: Path, *, color: bool = False):
+    """Консоль с явно заданной палитрой.
+
+    Палитра задаётся явно не для красоты: без неё она определялась бы по
+    окружению, и тест на текст проходил бы при выводе в конвейер и падал в
+    настоящем терминале. Тест не должен зависеть от того, как его запустили.
+    """
     identity = Identity.generate("alice")
     trust = TrustStore.load(tmp / "known.json")
     mesh = FakeMesh(identity)
-    console = Console(mesh, trust)
+    console = Console(mesh, trust, palette=Palette(enabled=color))
     console._write = lambda text: console_output.append(text)  # type: ignore[assignment]
     return console, mesh, trust
 
@@ -212,3 +218,39 @@ def test_bot_lines_are_marked_even_without_color():
             )
         )
         assert line.split("\n") == ["┃ строка", "┃ вторая"]
+
+
+def test_marks_survive_color_being_on():
+    """Пометки должны читаться и в цветном терминале, а не только в конвейере.
+
+    Регрессия: тесты задавали палитру по окружению, поэтому в конвейере они
+    проходили, а в настоящем терминале падали — цвет добавлял ANSI-коды вокруг
+    ровно тех символов, которые проверялись.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        console, _, trust = build(Path(tmp), color=True)
+        peer = Identity.generate("bob").public
+        trust.remember("bob", peer)
+
+        unverified = console._decorate(
+            ev.TextMessage(nick="bob", public=peer, text="привет", lamport=1)
+        )
+        assert "?" in unverified and "привет" in unverified
+        assert "\x1b[" in unverified  # цвет действительно включён
+
+        bot_line = console._decorate(
+            ev.TextMessage(
+                nick="dice", public=b"\x03" * 32, text="раз\nдва", lamport=1, is_bot=True
+            )
+        )
+        assert bot_line.count("┃") == 2
+
+
+def test_alert_emits_single_reset():
+    """Вложенные red(bold(...)) давали два сброса подряд — мусор в выводе."""
+    from p2pchat.ui.style import Palette as _Palette
+
+    painted = _Palette(enabled=True).alert("ВНИМАНИЕ")
+    assert painted.count("\x1b[0m") == 1
+    assert painted.startswith("\x1b[")
+    assert _Palette(enabled=False).alert("ВНИМАНИЕ") == "ВНИМАНИЕ"

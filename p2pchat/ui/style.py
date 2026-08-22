@@ -73,6 +73,14 @@ class Palette:
     def bot(self, text: str) -> str:
         return self._wrap(BOT, text)
 
+    def alert(self, text: str) -> str:
+        """Красное и жирное одной последовательностью.
+
+        Вложенные вызовы (`red(bold(...))`) дают два подряд идущих сброса:
+        визуально безвредно, но мусорно и мешает сравнивать вывод в тестах.
+        """
+        return self._wrap(RED + BOLD, text)
+
     def nick(self, name: str, public: bytes | None = None) -> str:
         if not self.enabled:
             return name

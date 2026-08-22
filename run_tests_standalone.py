@@ -28,15 +28,24 @@ def _install_pytest_stub() -> None:
     class Skipped(Exception):
         pass
 
+    class _Caught:
+        """Аналог ExceptionInfo: даёт доступ к пойманному исключению через .value."""
+
+        value = None
+
     @contextmanager
     def raises(expected):
+        caught = _Caught()
         try:
-            yield
-        except expected:
+            yield caught
+        except expected as exc:
+            caught.value = exc
             return
         except Exception as exc:
-            raise AssertionError(f"ожидалось {expected.__name__}, получено {exc!r}") from exc
-        raise AssertionError(f"ожидалось {expected.__name__}, но исключения не было")
+            name = getattr(expected, "__name__", str(expected))
+            raise AssertionError(f"ожидалось {name}, получено {exc!r}") from exc
+        name = getattr(expected, "__name__", str(expected))
+        raise AssertionError(f"ожидалось {name}, но исключения не было")
 
     def fixture(*args, **kwargs):
         def wrap(fn):

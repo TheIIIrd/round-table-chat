@@ -21,9 +21,9 @@ import time
 from collections.abc import Sequence
 from random import Random
 
-from ..format import panel
+from ..format import panel, plural
 from .api import Action, Finish, GameError, Say, Whisper
-from .cards import Card, CardError, deck36, parse_card, render_hand, sort_hand
+from .cards import Card, CardError, deck36, parse_card, render_hand, resolve_in_hand, sort_hand
 
 HAND_SIZE = 6
 MAX_ON_TABLE = 6
@@ -81,7 +81,8 @@ class Durak:
 
         actions: list[Action] = [
             Say(
-                f"Козырь: {self.trump_card} ({self.trump}). В колоде {len(self.deck)} карт.\n"
+                f"Козырь: {self.trump_card} ({self.trump}). "
+                f"В колоде {len(self.deck)} карт.\n"
                 f"Ходит {self._attacker()}, отбивается {self._defender()}.\n"
                 "!attack <карта>, !add <карта>, !beat <своя> <чужая>, !take, !pass, !hand\n"
                 "Руки видны только вам — и владельцу узла с ботом."
@@ -94,7 +95,7 @@ class Durak:
         if verb == "hand":
             return [Whisper(player, self._hand_text(player))]
         if verb == "table":
-            return [Whisper(player, self.render_table())]
+            return [Whisper(player, self.render_table(with_hints=True))]
         if self.finished:
             raise GameError("партия окончена")
         if player in self.out:
@@ -134,8 +135,15 @@ class Durak:
     # --- ходы ------------------------------------------------------------------
 
     def _attack(self, player: str, rest: str, *, first: bool) -> list[Action]:
+        """Кладёт одну или несколько карт.
+
+        Несколько за раз — не роскошь: подкидывать по одной, дожидаясь эха от
+        бота, в чате мучительно. `!attack 6♥ 6♣` кладёт обе, если правила
+        позволяют; если вторая не проходит — первая остаётся на столе, а игрок
+        получает объяснение по второй.
+        """
         if player == self._defender():
-            raise GameError("защищающийся не подкидывает")
+            raise GameError("защищающийся не подкидывает: !beat или !take")
         if first and self.table:
             raise GameError("ход уже сделан, подкидывайте: !add <карта>")
         if not first and not self.table:
@@ -143,7 +151,38 @@ class Durak:
         if first and player != self._attacker():
             raise GameError(f"первым ходит {self._attacker()}")
 
-        card = self._card_from_hand(player, rest)
+        tokens = rest.split()
+        if not tokens:
+            raise GameError("укажите карту: !attack <карта>")
+
+        placed: list[Card] = []
+        problem = ""
+        for token in tokens:
+            try:
+                card = self._card_from_hand(player, token)
+                self._check_can_place(card)
+            except GameError as exc:
+                problem = str(exc)
+                break
+            self.hands[player].remove(card)
+            self.table.append((card, None))
+            placed.append(card)
+
+        if not placed:
+            raise GameError(problem)
+
+        self.passed.discard(player)
+        laid = ", ".join(str(card) for card in placed)
+        text = f"{player} кладёт {laid}."
+        if problem:
+            text += f" (дальше нельзя: {problem})"
+        return [
+            Say(f"{text}\n{self.render_table(with_hints=True)}"),
+            Whisper(player, self._hand_text(player)),
+        ]
+
+    def _check_can_place(self, card: Card) -> None:
+        """Проверяет, можно ли положить карту на стол прямо сейчас."""
         if self.table:
             ranks = {laid.rank for laid, _ in self.table}
             ranks |= {beat.rank for _, beat in self.table if beat is not None}
@@ -155,14 +194,6 @@ class Durak:
         undefended = sum(1 for _, beat in self.table if beat is None)
         if undefended >= len(self.hands[self._defender()]):
             raise GameError(f"{self._defender()} нечем отбиваться — больше не подкинуть")
-
-        self.hands[player].remove(card)
-        self.table.append((card, None))
-        self.passed.discard(player)
-        return [
-            Say(f"{player} кладёт {card}.\n{self.render_table()}"),
-            Whisper(player, self._hand_text(player)),
-        ]
 
     def _defend(self, player: str, rest: str) -> list[Action]:
         if player != self._defender():
@@ -184,7 +215,7 @@ class Durak:
             raise GameError(f"{target} нет на столе среди неотбитых")
 
         actions: list[Action] = [
-            Say(f"{player} бьёт {target} картой {mine}.\n{self.render_table()}"),
+            Say(f"{player} бьёт {target} картой {mine}.\n{self.render_table(with_hints=True)}"),
             Whisper(player, self._hand_text(player)),
         ]
         if all(beat is not None for _, beat in self.table) and not self.hands[player]:
@@ -198,7 +229,8 @@ class Durak:
             raise GameError("со стола нечего брать")
         taken = [card for pair in self.table for card in pair if card is not None]
         self.hands[player].extend(taken)
-        return [Say(f"{player} забирает {len(taken)} карт.")] + self._reset_round(taken=True)
+        word = plural(len(taken), "карту", "карты", "карт")
+        return [Say(f"{player} забирает {len(taken)} {word}.")] + self._reset_round(taken=True)
 
     def _pass(self, player: str) -> list[Action]:
         if not self.table:
@@ -246,7 +278,7 @@ class Durak:
         actions.append(
             Say(
                 f"Ходит {self._attacker()}, отбивается {self._defender()}. "
-                f"В колоде {len(self.deck)}."
+                f"В колоде {len(self.deck)}.\n" + self._hints_line()
             )
         )
         actions += [Whisper(player, self._hand_text(player)) for player in active]
@@ -264,17 +296,19 @@ class Durak:
 
     # --- служебное --------------------------------------------------------------
 
-    def render_table(self) -> str:
+    def render_table(self, with_hints: bool = False) -> str:
         body = (
             " ".join(f"{laid}/{beat}" if beat else f"{laid}/·" for laid, beat in self.table)
             if self.table
             else "(пусто)"
         )
-        return panel(
+        table = panel(
             body,
             title=f"Стол · козырь {self.trump}",
             footer=f"колода {len(self.deck)}",
         )
+        hints = self._hints_line() if with_hints else ""
+        return f"{table}\n{hints}" if hints else table
 
     def _hand_text(self, player: str) -> str:
         hand = self.hands.get(player, [])
@@ -316,10 +350,33 @@ class Durak:
             raise GameError(str(exc)) from exc
 
     def _card_from_hand(self, player: str, text: str) -> Card:
-        card = self._parse(text)
-        if card not in self.hands.get(player, []):
-            raise GameError(f"{card} нет у вас на руках")
-        return card
+        try:
+            return resolve_in_hand(text, self.hands.get(player, []))
+        except CardError as exc:
+            raise GameError(str(exc)) from exc
+
+    def _hints_for(self, player: str) -> str:
+        """Что этот игрок может сделать прямо сейчас."""
+        if self.finished or player in self.out:
+            return ""
+        if player == self._defender():
+            undefended = [laid for laid, beat in self.table if beat is None]
+            if not undefended:
+                return "ждёте: подкинут или скажут «бито»"
+            return f"!beat <своя> {undefended[0]}   !take   !hand"
+        if not self.table:
+            return "!attack <карта>   !hand" if player == self._attacker() else "ждёте хода"
+        if any(beat is None for _, beat in self.table):
+            return "!add <карта>, ждём защиту"
+        return "!add <карта>   !pass"
+
+    def _hints_line(self) -> str:
+        parts = [
+            f"{player}: {hint}"
+            for player in self._active()
+            if (hint := self._hints_for(player))
+        ]
+        return "\n".join(parts)
 
     def _arm(self) -> None:
         self.deadline = time.monotonic() + TURN_TIMEOUT

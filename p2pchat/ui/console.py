@@ -104,7 +104,7 @@ class Console:
             return f"{mark}{colors.nick(event.nick, event.public)}: {text}"
 
         if isinstance(event, ev.Alert):
-            return colors.red(colors.bold(event.render()))
+            return colors.alert(event.render())
         if isinstance(event, ev.PeerConnected):
             return colors.green(event.render())
         if isinstance(event, ev.PeerDisconnected):

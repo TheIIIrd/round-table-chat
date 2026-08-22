@@ -395,3 +395,76 @@ def test_hangman_yo_is_treated_as_e():
     game.handle("alice", "letter", "е")
     assert "ё" in game.opened or "е" in game.opened
     assert "_" in game.masked()
+
+
+# --- удобство ввода в дураке ------------------------------------------------------
+
+
+def test_card_can_be_named_by_rank_when_unambiguous():
+    """Единственную десятку не нужно уточнять мастью — так просили за столом."""
+    from p2pchat.games.cards import resolve_in_hand
+
+    hand = [Card("10", "♥"), Card("6", "♣"), Card("Т", "♦")]
+    assert resolve_in_hand("10", hand) == Card("10", "♥")
+    assert resolve_in_hand("т", hand) == Card("Т", "♦")
+    assert resolve_in_hand("6к", hand) == Card("6", "♣")  # крести тоже «к»
+    assert resolve_in_hand("8p", [Card("8", "♠")]) == Card("8", "♠")  # латинская p
+    assert resolve_in_hand("Bт", [Card("В", "♣")]) == Card("В", "♣")  # латинская B
+
+
+def test_ambiguous_rank_asks_instead_of_guessing():
+    from p2pchat.games.cards import resolve_in_hand
+
+    hand = [Card("10", "♥"), Card("10", "♠")]
+    with pytest.raises(CardError) as caught:
+        resolve_in_hand("10", hand)
+    assert "10♥" in str(caught.value) and "10♠" in str(caught.value)
+
+    with pytest.raises(CardError):
+        resolve_in_hand("9", hand)  # такого достоинства нет вовсе
+
+
+def test_several_cards_in_one_command():
+    game = Durak(Random(3))
+    game.start(("alice", "bob", "carol"))
+    attacker, defender = game._attacker(), game._defender()
+    game.hands[attacker] = [Card("6", "♥"), Card("6", "♣"), Card("Д", "♦")]
+    game.hands[defender] = [Card("Т", "♥"), Card("Т", "♣"), Card("7", "♠")]
+
+    result = game.handle(attacker, "attack", "6♥ 6♣")
+    assert len(game.table) == 2
+    assert "6♥, 6♣" in texts(result)
+
+
+def test_partial_multicard_move_explains_the_rest():
+    """Первая карта остаётся на столе, по второй игрок получает объяснение."""
+    game = Durak(Random(3))
+    game.start(("alice", "bob"))
+    attacker = game._attacker()
+    game.hands[attacker] = [Card("6", "♥"), Card("9", "♣")]
+
+    result = game.handle(attacker, "attack", "6♥ 9♣")
+    assert len(game.table) == 1
+    assert "дальше нельзя" in texts(result)
+
+
+def test_hints_tell_each_player_what_they_can_do():
+    game = Durak(Random(3))
+    game.start(("alice", "bob", "carol"))
+    attacker, defender = game._attacker(), game._defender()
+    game.handle(attacker, "attack", str(game.hands[attacker][0]))
+
+    hints = game._hints_line()
+    assert f"{defender}: !beat" in hints and "!take" in hints
+    assert "!add" in hints
+
+
+def test_taking_cards_is_declined_properly():
+    """«1 карт» резало глаз — числительные должны склоняться."""
+    from p2pchat.format import plural
+
+    assert plural(1, "карту", "карты", "карт") == "карту"
+    assert plural(2, "карту", "карты", "карт") == "карты"
+    assert plural(5, "карту", "карты", "карт") == "карт"
+    assert plural(11, "карту", "карты", "карт") == "карт"
+    assert plural(21, "карту", "карты", "карт") == "карту"

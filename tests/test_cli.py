@@ -295,3 +295,21 @@ def test_key_file_parsing_rejects_damage(tmp_path, monkeypatch):
             raise AssertionError("повреждённый файл принят")
         except KeyFileError:
             pass
+
+
+def test_common_flags_work_before_and_after_subcommand():
+    """Человек естественно пишет `p2pchat chat --no-color`, и это должно работать.
+
+    argparse по умолчанию требует ставить общие флаги до подкоманды и отвечает
+    «unrecognized arguments» — отказ на ровном месте, который легко принять за
+    отсутствие флага.
+    """
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["--no-color", "chat"]).no_color is True
+    assert parser.parse_args(["chat", "--no-color"]).no_color is True
+    assert parser.parse_args(["chat"]).no_color is False
+
+    assert str(parser.parse_args(["--home", "/a", "whoami"]).home) == "/a"
+    assert str(parser.parse_args(["whoami", "--home", "/b"]).home) == "/b"
+    assert str(parser.parse_args(["roster", "show", "--home", "/c"]).home) == "/c"

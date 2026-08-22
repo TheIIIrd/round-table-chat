@@ -15,16 +15,22 @@ from dataclasses import dataclass
 from random import Random
 
 SUITS = ("♠", "♥", "♦", "♣")
+# Люди называют масти по-разному («трефы» и «крести», «бубны» и «буби») и
+# промахиваются раскладкой: латинская p похожа на п, B на В. Отказывать из-за
+# этого — худшее, что может сделать игра, поэтому принимаем все варианты.
 SUIT_ALIASES = {
-    "♠": "♠", "п": "♠", "s": "♠",
+    "♠": "♠", "п": "♠", "s": "♠", "p": "♠",
     "♥": "♥", "ч": "♥", "h": "♥",
     "♦": "♦", "б": "♦", "d": "♦",
-    "♣": "♣", "т": "♣", "c": "♣",
+    "♣": "♣", "т": "♣", "к": "♣", "c": "♣", "k": "♣",
 }
 
 RANKS_36 = ("6", "7", "8", "9", "10", "В", "Д", "К", "Т")
+# «к» и «к» — беда: это и король, и крести. Достоинство разбирается раньше
+# масти и только из начала строки, поэтому «Кч» — король червей, а «6к» —
+# шестёрка крестей; неоднозначности не возникает.
 RANK_ALIASES = {
-    "j": "В", "в": "В",
+    "j": "В", "в": "В", "b": "В",
     "q": "Д", "д": "Д",
     "k": "К", "к": "К",
     "a": "Т", "т": "Т",
@@ -54,6 +60,15 @@ class Card:
         return self.suit == trump and other.suit != trump
 
 
+def parse_rank(text: str, ranks: tuple[str, ...] = RANKS_36) -> str | None:
+    """Разбирает одно достоинство без масти: «10», «т», «в»."""
+    raw = text.strip().lower()
+    if not raw:
+        return None
+    rank = RANK_ALIASES.get(raw, raw.upper() if raw != "10" else "10")
+    return rank if rank in ranks else None
+
+
 def parse_card(text: str, ranks: tuple[str, ...] = RANKS_36) -> Card:
     raw = text.strip().replace(" ", "")
     if len(raw) < 2:
@@ -69,6 +84,40 @@ def parse_card(text: str, ranks: tuple[str, ...] = RANKS_36) -> Card:
     if rank not in ranks:
         raise CardError(f"не понял достоинство в «{text}» (от {ranks[0]} до {ranks[-1]})")
     return Card(rank=rank, suit=suit)
+
+
+def resolve_in_hand(text: str, hand: Sequence[Card], ranks: tuple[str, ...] = RANKS_36) -> Card:
+    """Находит карту в руке по описанию, допуская сокращения.
+
+    Если достоинство в руке одно — масть указывать не нужно: «!attack 10»
+    сыграет единственную десятку. Если их несколько, игра не гадает, а
+    перечисляет варианты: угаданная не та карта хуже переспроса.
+    """
+    text = text.strip()
+    if not text:
+        raise CardError("не указана карта")
+
+    try:
+        card = parse_card(text, ranks)
+    except CardError:
+        card = None
+
+    if card is not None:
+        if card not in hand:
+            raise CardError(f"{card} нет у вас на руках")
+        return card
+
+    rank = parse_rank(text, ranks)
+    if rank is None:
+        raise CardError(f"«{text}» не похоже на карту")
+
+    matches = [item for item in hand if item.rank == rank]
+    if not matches:
+        raise CardError(f"карт достоинства {rank} у вас нет")
+    if len(matches) > 1:
+        options = " ".join(str(item) for item in matches)
+        raise CardError(f"у вас несколько таких карт — уточните масть: {options}")
+    return matches[0]
 
 
 def deck36(rng: Random) -> list[Card]:
