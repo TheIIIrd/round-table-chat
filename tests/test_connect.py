@@ -300,7 +300,7 @@ def test_discovery_over_real_multicast():
         return True
 
     if asyncio.run(scenario()) is None:
-        print("      (мультикаст в этом окружении недоступен — проверка пропущена)")
+        pytest.skip("мультикаст в этом окружении недоступен: сокет есть, пакеты не ходят")
 
 
 def test_announced_port_is_remembered_with_observed_host():

@@ -19,7 +19,9 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
+import io
 import json
 import textwrap
 from pathlib import Path
@@ -76,8 +78,14 @@ def test_chat_and_bot_accept_discover_flag():
     assert parser.parse_args(["chat"]).discover == "off"
     assert parser.parse_args(["chat", "--discover", "lan"]).discover == "lan"
     assert parser.parse_args(["bot", "--discover", "lan"]).discover == "lan"
-    with pytest.raises(SystemExit):
-        parser.parse_args(["chat", "--discover", "телепатия"])
+
+    # argparse печатает свою жалобу в stderr перед выходом. Проверять отказ
+    # нужно, а вот показывать эту жалобу в прогоне тестов — нет: посторонний
+    # вывод приучает пропускать глазами то, на что стоило бы смотреть.
+    with io.StringIO() as swallowed, contextlib.redirect_stderr(swallowed):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["chat", "--discover", "телепатия"])
+        assert "invalid choice" in swallowed.getvalue()
 
 
 def test_address_parsing():

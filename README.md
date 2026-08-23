@@ -66,6 +66,10 @@ python -m p2pchat chat --listen 0.0.0.0:9333 --discover lan   # если все 
 ## Тесты
 
 ```bash
+mkdir -p tests/vectors && curl -L -o tests/vectors/cacophony.json https://raw.githubusercontent.com/mcginty/snow/master/tests/vectors/cacophony.txt
+```
+
+```bash
 python -m pytest tests -q
 ```
 
