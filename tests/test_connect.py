@@ -282,16 +282,17 @@ def test_discovery_over_real_multicast():
         try:
             await listener.start()
             await talker.start()
-        except OSError:
+        except OSError as exc:
             await listener.stop()
             await talker.stop()
-            return None
+            return f"сокет не открылся: {exc}"
         try:
             public, _, port, nick = await asyncio.wait_for(received.get(), 3)
         except asyncio.TimeoutError:
-            # Сокет создался, но пакеты не ходят — так ведут себя контейнеры и
-            # часть конфигураций firewall. Это свойство окружения, не ошибка.
-            return None
+            # Сокет создался, но пакеты не дошли. Возвращаем не просто «нет», а
+            # число ушедших биконов: без него непонятно, где обрыв — на
+            # отправке или на приёме, — и пропуск превращается в загадку.
+            return f"биконов отправлено {talker.sent}, принято 0"
         finally:
             await listener.stop()
             await talker.stop()
@@ -299,8 +300,12 @@ def test_discovery_over_real_multicast():
         assert nick == "talker" and port == 9502 and public == b"\x09" * 32
         return True
 
-    if asyncio.run(scenario()) is None:
-        pytest.skip("мультикаст в этом окружении недоступен: сокет есть, пакеты не ходят")
+    outcome = asyncio.run(scenario())
+    if outcome is not True:
+        pytest.skip(
+            f"мультикаст в этом окружении недоступен ({outcome}). "
+            "Проверить отдельно: python -m p2pchat lantest"
+        )
 
 
 def test_announced_port_is_remembered_with_observed_host():
@@ -370,3 +375,41 @@ def test_forget_removes_by_nick_and_survives_reload():
         assert store.forget("bob") is True
         assert TrustStore.load(path).by_key(key) is None
         assert store.forget("bob") is False
+
+
+def test_long_cyrillic_nick_survives_the_wire():
+    """Обрезка UTF-8 по байтам разрубала символ пополам.
+
+    Нашлось не тестом, а собственной диагностикой: ники «проверка-приём» и
+    «проверка-передача» длиннее 32 байт, бикон становился неразбираемым и
+    молча отбрасывался. В кириллице тридцать три байта — это семнадцать букв,
+    так что промахнуться легко.
+    """
+    from p2pchat.format import clip_utf8
+    from p2pchat.net.discovery import MAX_NICK_LEN
+
+    long_nick = "проверка-передача-очень-длинная"
+    assert len(long_nick.encode("utf-8")) > MAX_NICK_LEN
+
+    beacon = Beacon(group_id=b"\x01" * 16, public=b"\x02" * 32, port=9333, nick=long_nick)
+    decoded = Beacon.decode(beacon.encode())
+    assert decoded is not None, "бикон с длинным ником не разобрался"
+    assert long_nick.startswith(decoded.nick)
+
+    member = Member(nick=long_nick, public=Identity.generate().public, host="х" * 200, port=9333)
+    parsed = invites.decode_peer(invites.encode_peer(member))
+    assert long_nick.startswith(parsed.member.nick)
+
+    # Обрезка не создаёт битых байтов ни на какой длине.
+    for limit in range(1, 40):
+        clipped = clip_utf8("абвгдеёжзий", limit)
+        assert len(clipped) <= limit
+        clipped.decode("utf-8")  # не должно бросать
+
+
+def test_beacon_rejects_truncated_utf8():
+    """Обратная сторона: битый ник в чужом биконе не должен ронять разбор."""
+    good = Beacon(group_id=b"\x01" * 16, public=b"\x02" * 32, port=9333, nick="аб").encode()
+    broken = bytearray(good)
+    broken[-1] = 0xD0  # оборванный первый байт двухбайтового символа
+    assert Beacon.decode(bytes(broken)) is None

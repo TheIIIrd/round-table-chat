@@ -23,6 +23,7 @@ from .bot.runner import Bot
 from .crypto.identity import Identity, KeyFileError, fingerprint
 from .proto import invite as invites
 from .proto.invite import InviteError
+from .net.discovery import MULTICAST_GROUP, MULTICAST_PORT, Discovery
 from .proto.mesh import Mesh
 from .proto.roster import Member, Roster, RosterError
 from .proto.trust import TrustStore
@@ -107,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
         "colortest", parents=[common], help="проверить, как терминал показывает цвет"
     )
     colors.set_defaults(handler=cmd_colortest)
+
+    lantest = sub.add_parser(
+        "lantest", parents=[common], help="проверить обнаружение в локальной сети"
+    )
+    lantest.set_defaults(handler=cmd_lantest)
 
     invite = sub.add_parser("invite", parents=[common], help="показать свою строку-приглашение")
     invite.add_argument("--address", help="host:port, под которым вас видно снаружи")
@@ -254,6 +260,71 @@ def cmd_colortest(args) -> int:
     else:
         print("Цвет отключён: не терминал, NO_COLOR, TERM=dumb или --no-color.")
     return 0
+
+
+def cmd_lantest(_args) -> int:
+    """Проверяет, ходит ли мультикаст на этой машине.
+
+    Запускает два узла обнаружения в одном процессе и смотрит, увидят ли они
+    друг друга. Отвечает на вопрос, который иначе приходится выяснять по
+    странному поведению чата: работает ли здесь `--discover lan` вообще.
+    """
+
+    async def probe() -> tuple[bool, list[str]]:
+        found: asyncio.Queue = asyncio.Queue()
+        problems: list[str] = []
+        listener = Discovery(
+            group_id=b"\x00" * 16,
+            public=b"\x01" * 32,
+            nick="проверка-приём",
+            port=1,
+            on_peer=lambda *args: found.put_nowait(args),
+            on_error=problems.append,
+            interval=100.0,
+        )
+        talker = Discovery(
+            group_id=b"\x00" * 16,
+            public=b"\x02" * 32,
+            nick="проверка-передача",
+            port=2,
+            on_peer=lambda *args: None,
+            on_error=problems.append,
+            interval=0.3,
+        )
+        try:
+            await listener.start()
+            await talker.start()
+        except OSError as exc:
+            return False, [f"не удалось открыть сокет: {exc}"]
+        try:
+            await asyncio.wait_for(found.get(), 4)
+            return True, problems
+        except asyncio.TimeoutError:
+            return False, problems
+        finally:
+            await listener.stop()
+            await talker.stop()
+
+    print(f"Группа {MULTICAST_GROUP}, порт {MULTICAST_PORT}, TTL 1\n")
+    works, problems = asyncio.run(probe())
+
+    for problem in problems:
+        print(f"  ошибка отправки: {problem}")
+
+    if works:
+        print("Мультикаст работает: узлы на этой машине видят друг друга.")
+        print("Флаг --discover lan можно использовать.")
+        return 0
+
+    print("Мультикаст НЕ работает в этом окружении.")
+    print("Это бывает в контейнерах, в некоторых конфигурациях Nix и при")
+    print("настройках firewall. Чат от этого не ломается — просто указывайте")
+    print("адреса в ростере или подключайтесь через /connect.\n")
+    print("Что посмотреть на Linux:")
+    print("  ip link | grep -i multicast        есть ли у интерфейсов флаг MULTICAST")
+    print("  ip route show type multicast       есть ли маршрут для 224.0.0.0/4")
+    print("  sudo iptables -L INPUT -n          не режется ли UDP")
+    return 1
 
 
 def cmd_invite(args) -> int:

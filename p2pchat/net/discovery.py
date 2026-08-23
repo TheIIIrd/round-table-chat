@@ -24,6 +24,8 @@ import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..format import clip_utf8
+
 MULTICAST_GROUP = "239.255.77.33"
 MULTICAST_PORT = 45333
 BEACON_INTERVAL = 2.0
@@ -40,7 +42,7 @@ class Beacon:
     nick: str
 
     def encode(self) -> bytes:
-        nick = self.nick.encode("utf-8")[:MAX_NICK_LEN]
+        nick = clip_utf8(self.nick, MAX_NICK_LEN)
         return (
             MAGIC
             + bytes([len(self.group_id)])
@@ -130,10 +132,25 @@ class Discovery:
         with contextlib.suppress(AttributeError, OSError):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.bind(("", self.multicast_port))
-        membership = struct.pack(
-            "4s4s", socket.inet_aton(self.multicast_group), socket.inet_aton("0.0.0.0")
-        )
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+
+        # Членство запрашивается на нескольких интерфейсах, а не только на
+        # 0.0.0.0. С INADDR_ANY интерфейс выбирает ядро по таблице маршрутов, и
+        # если бикон уходит через другой, пакеты формально отправляются, но
+        # никем не принимаются: «сокет есть, пакеты не ходят». Loopback добавлен
+        # явно — от него зависит случай, когда несколько участников работают на
+        # одной машине.
+        joined = 0
+        for interface in ("0.0.0.0", "127.0.0.1"):
+            membership = struct.pack(
+                "4s4s", socket.inet_aton(self.multicast_group), socket.inet_aton(interface)
+            )
+            with contextlib.suppress(OSError):
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+                joined += 1
+        if not joined:
+            sock.close()
+            raise OSError("не удалось вступить в мультикаст-группу ни на одном интерфейсе")
+
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)  # не за пределы сегмента
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
 
@@ -169,36 +186,47 @@ class Discovery:
             await asyncio.sleep(self.interval)
 
     def _announce(self, payload: bytes) -> None:
-        """Шлёт бикон, при неудаче один раз пробует через loopback.
+        """Шлёт бикон через маршрут по умолчанию И явно через loopback.
 
-        В окружениях без маршрута для 239.0.0.0/8 (контейнеры, некоторые
-        конфигурации Nix и firewall) отправка падает с ``OSError``. Раньше
-        ошибка молча проглатывалась, и обнаружение делало вид, что работает.
-        Теперь мы пробуем явно привязать мультикаст к loopback — этого хватает
-        для нескольких клиентов на одной машине, — а если и это не вышло,
-        сообщаем наверх один раз, вместо того чтобы тихо ничего не делать.
+        Две отправки вместо одной — не перестраховка. В окружениях без маршрута
+        для 239.0.0.0/8 (контейнеры, часть конфигураций Nix, firewall) первая
+        падает с ``OSError``. А там, где она проходит, пакет может уйти через
+        интерфейс, на котором никто не слушает, — и участники на одной машине
+        друг друга не увидят. Копия через loopback закрывает оба случая и за
+        пределы машины не выходит.
+
+        Молчащее обнаружение хуже отсутствующего, поэтому если не прошла ни
+        одна отправка, об этом сообщается наверх — один раз.
         """
         if self._transport is None:
             return
-        try:
-            self._transport.sendto(payload, (self.multicast_group, self.multicast_port))
+
+        target = (self.multicast_group, self.multicast_port)
+        delivered = 0
+        last_error: OSError | None = None
+
+        for interface in (None, "127.0.0.1"):
+            try:
+                if interface is not None and self._socket is not None:
+                    self._socket.setsockopt(
+                        socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface)
+                    )
+                self._transport.sendto(payload, target)
+                delivered += 1
+            except OSError as exc:
+                last_error = exc
+
+        # Возвращаем выбор интерфейса ядру, чтобы следующая отправка снова
+        # пошла обычным маршрутом.
+        if self._socket is not None:
+            with contextlib.suppress(OSError):
+                self._socket.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("0.0.0.0")
+                )
+
+        if delivered:
             self.sent += 1
             return
-        except OSError as exc:
-            first_error = exc
-
-        if not self._loopback_tried and self._socket is not None:
-            self._loopback_tried = True
-            try:
-                self._socket.setsockopt(
-                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1")
-                )
-                self._transport.sendto(payload, (self.multicast_group, self.multicast_port))
-                self.sent += 1
-                return
-            except OSError as exc:
-                first_error = exc
-
         if not self._reported and self.on_error is not None:
             self._reported = True
-            self.on_error(str(first_error))
+            self.on_error(str(last_error) if last_error else "отправка не прошла")

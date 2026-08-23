@@ -46,6 +46,20 @@ def strip_ansi(text: str) -> str:
     return ANSI.sub("", text)
 
 
+def clip_utf8(text: str, limit: int) -> bytes:
+    """Кодирует строку в UTF-8, укладываясь в ``limit`` байт.
+
+    Обрезка среза (``text.encode()[:limit]``) разрубает многобайтовый символ
+    пополам, и получившиеся байты уже не декодируются. В кириллице это
+    случается на ровном месте: тридцать три байта — это семнадцать букв.
+    Оборванный хвост отбрасывается целиком.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return encoded
+    return encoded[:limit].decode("utf-8", errors="ignore").encode("utf-8")
+
+
 def width(text: str) -> int:
     """Ширина строки в знакоместах: широкие символы считаются за два."""
     total = 0

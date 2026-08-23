@@ -27,6 +27,7 @@ import json
 from dataclasses import dataclass
 
 from ..crypto import primitives as p
+from ..format import clip_utf8
 from ..crypto.identity import fingerprint
 from .roster import Member, Roster
 
@@ -105,8 +106,8 @@ def _decode(text: str, magic: bytes, prefix: str) -> bytes:
 
 
 def encode_peer(member: Member) -> str:
-    nick = member.nick.encode("utf-8")[:MAX_NICK_LEN]
-    host = (member.host or "").encode("utf-8")[:MAX_HOST_LEN]
+    nick = clip_utf8(member.nick, MAX_NICK_LEN)
+    host = clip_utf8(member.host or "", MAX_HOST_LEN)
     flags = FLAG_BOT if member.is_bot else 0
     payload = (
         member.public
