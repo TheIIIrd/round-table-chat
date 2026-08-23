@@ -329,3 +329,60 @@ def test_no_duplicate_test_definitions():
         names = _re.findall(r"^(?:async )?def (\w+)", path.read_text(), _re.MULTILINE)
         duplicates = sorted({name for name in names if names.count(name) > 1})
         assert not duplicates, f"{path.name}: повторные определения {duplicates}"
+
+
+def test_aliases_are_free_of_typos():
+    """Синоним из смеси кириллицы и латиницы — почти наверняка опечатка.
+
+    Один такой уже был: «виселицa» с латинской «a» рядом с настоящим синонимом.
+    Он работал бы только у того, кто повторит ту же опечатку.
+    """
+    from p2pchat.games import CATALOG
+    from p2pchat.games.lobby import GAME_ALIASES, LOBBY_ALIASES
+    from p2pchat.ui.console import ALIASES
+
+    def mixed_script(word: str) -> bool:
+        cyrillic = any("а" <= ch.lower() <= "я" or ch == "ё" for ch in word)
+        latin = any("a" <= ch.lower() <= "z" for ch in word)
+        return cyrillic and latin
+
+    groups = [ALIASES, GAME_ALIASES, LOBBY_ALIASES]
+    groups += [game.aliases for game in CATALOG.values()]
+    for group in groups:
+        bad = sorted(word for word in group if mixed_script(word))
+        assert not bad, f"смешанные алфавиты в синонимах: {bad}"
+
+
+def test_documentation_links_resolve():
+    """Ссылки между документами должны вести на существующие файлы.
+
+    Документация из восьми файлов легко расползается: файл переименовали,
+    ссылку забыли. Битая ссылка в инструкции по подключению стоит человеку
+    получаса.
+    """
+    import re as _re
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent
+    for source in [root / "README.md", *sorted((root / "docs").glob("*.md"))]:
+        text = source.read_text(encoding="utf-8")
+        for target in _re.findall(r"\]\(([^)#]+\.md)[^)]*\)", text):
+            resolved = (source.parent / target).resolve()
+            assert resolved.exists(), f"{source.name}: ссылка на несуществующий {target}"
+
+
+def test_documented_commands_exist():
+    """Команды из документации должны существовать в парсере."""
+    import re as _re
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent
+    parser = cli.build_parser()
+    known = set()
+    for action in parser._subparsers._group_actions[0].choices:  # noqa: SLF001
+        known.add(action)
+
+    text = (root / "docs" / "usage.md").read_text(encoding="utf-8")
+    documented = set(_re.findall(r"python -m p2pchat (?:--\S+ \S+ )?(\w+)", text))
+    unknown = sorted(documented - known)
+    assert not unknown, f"в документации есть несуществующие команды: {unknown}"

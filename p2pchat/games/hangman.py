@@ -41,7 +41,7 @@ class Hangman:
     min_players = 1
     max_players = 8
     verbs = frozenset({"letter", "word", "gallows"})
-    aliases = {"буква": "letter", "слово": "word", "виселица": "gallows", "виселицa": "gallows"}
+    aliases = {"буква": "letter", "слово": "word", "виселица": "gallows"}
 
     def __init__(self, rng: Random) -> None:
         self._rng = rng
