@@ -4,9 +4,14 @@ Noise_XX доказывает владение ключом, но не отве�
 Ответ даёт человек — один раз, сверив SAS голосом. Здесь этот ответ хранится,
 чтобы не переспрашивать при каждом соединении.
 
-Ключевой сценарий — смена ключа у известного пира. Это либо переустановка у
-него, либо атака. Отличить их программа не может, поэтому она не гадает:
-соединение отвергается, а решение остаётся человеку.
+Записи хранятся **по публичному ключу**, а не по нику. Личность — это ключ; ник
+лишь ярлык, который человек может сменить, а посторонний — присвоить. Пока
+ключом словаря был ник, смена ника стирала отметку о сверке, а чужак, назвавшийся
+знакомым именем, вызывал у вас тревогу о «подмене ключа» на пустом месте.
+
+Ключевой сценарий — под знакомым ником приходит другой ключ. Это либо
+переустановка у собеседника, либо атака. Отличить их программа не может, поэтому
+она не гадает: соединение отвергается, а решение остаётся человеку.
 """
 
 from __future__ import annotations
@@ -21,10 +26,10 @@ from ..crypto.identity import fingerprint
 
 
 class TrustDecision(Enum):
-    NEW = "new"  # видим впервые
-    KNOWN = "known"  # ключ совпал, SAS ещё не сверялся
-    VERIFIED = "verified"  # ключ совпал и был сверен человеком
-    KEY_CHANGED = "key_changed"  # ключ не тот, что записан ранее
+    NEW = "new"  # ключ видим впервые
+    KNOWN = "known"  # ключ знаком, SAS ещё не сверялся
+    VERIFIED = "verified"  # ключ знаком и был сверен человеком
+    NICK_TAKEN = "nick_taken"  # под этим ником уже известен ДРУГОЙ ключ
 
 
 @dataclass
@@ -52,7 +57,7 @@ class PeerRecord:
 @dataclass
 class TrustStore:
     path: Path
-    peers: dict[str, PeerRecord] = field(default_factory=dict)  # nick -> запись
+    peers: dict[str, PeerRecord] = field(default_factory=dict)  # ключ в hex -> запись
 
     @classmethod
     def load(cls, path: str | Path) -> "TrustStore":
@@ -64,7 +69,7 @@ class TrustStore:
         except json.JSONDecodeError as exc:
             raise ValueError(f"список известных пиров повреждён: {exc}") from exc
         peers = {
-            item["nick"]: PeerRecord(
+            item["key"]: PeerRecord(
                 nick=item["nick"],
                 key=item["key"],
                 verified=bool(item.get("verified", False)),
@@ -85,23 +90,25 @@ class TrustStore:
         os.replace(tmp, self.path)
 
     def by_key(self, public: bytes) -> PeerRecord | None:
-        hexed = public.hex()
+        return self.peers.get(public.hex())
+
+    def by_nick(self, nick: str) -> PeerRecord | None:
         for record in self.peers.values():
-            if record.key == hexed:
+            if record.nick == nick:
                 return record
         return None
 
-    def check(self, nick: str, public: bytes) -> TrustDecision:
-        record = self.peers.get(nick)
-        if record is None:
-            return TrustDecision.NEW
-        if record.key != public.hex():
-            return TrustDecision.KEY_CHANGED
-        return TrustDecision.VERIFIED if record.verified else TrustDecision.KNOWN
+    def check(self, public: bytes, nick: str = "") -> TrustDecision:
+        record = self.by_key(public)
+        if record is not None:
+            return TrustDecision.VERIFIED if record.verified else TrustDecision.KNOWN
+        if nick and self.by_nick(nick) is not None:
+            return TrustDecision.NICK_TAKEN
+        return TrustDecision.NEW
 
-    def remember(self, nick: str, public: bytes, *, verified: bool = False) -> PeerRecord:
+    def remember(self, public: bytes, nick: str, *, verified: bool = False) -> PeerRecord:
         record = PeerRecord(nick=nick, key=public.hex(), verified=verified)
-        self.peers[nick] = record
+        self.peers[record.key] = record
         self.save()
         return record
 
@@ -121,7 +128,7 @@ class TrustStore:
         self.save()
 
     def mark_verified(self, nick: str) -> bool:
-        record = self.peers.get(nick)
+        record = self.by_nick(nick)
         if record is None:
             return False
         record.verified = True
@@ -129,13 +136,15 @@ class TrustStore:
         return True
 
     def forget(self, nick: str) -> bool:
-        if self.peers.pop(nick, None) is None:
+        record = self.by_nick(nick)
+        if record is None:
             return False
+        self.peers.pop(record.key, None)
         self.save()
         return True
 
     def describe(self, nick: str) -> str:
-        record = self.peers.get(nick)
+        record = self.by_nick(nick)
         if record is None:
             return f"{nick}: неизвестен"
         mark = "сверен" if record.verified else "НЕ сверен"

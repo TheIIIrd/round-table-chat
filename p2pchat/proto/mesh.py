@@ -1,33 +1,24 @@
-"""Попарный меш: по одной защищённой сессии с каждым участником.
+"""Прикладной слой: что означают байты, которые доставила сеть.
 
-Групповое сообщение шифруется отдельно для каждого получателя. Трафик растёт
-линейно по числу участников, зато свойства безопасности ровно те же, что у
-разговора один на один: никаких общих групповых ключей, которые надо было бы
-менять при уходе участника.
+Соединения, доверие и обнаружение живут в ``network.py``. Здесь остаётся то,
+ради чего всё затевалось: конверты, текст, передача файлов и поток событий для
+интерфейса.
 
-**Кто кому звонит.** Если оба пира одновременно подключатся друг к другу,
-получатся две сессии вместо одной. Правило простое: звонит тот, чей публичный
-ключ меньше. Ключи различны и упорядочены одинаково у обеих сторон, так что
-договариваться не нужно. Исключение — участник без своего адреса: ему звонить
-некуда, поэтому звонит он. На случай гонки есть и проверка при приёме.
-
-**Кого пускаем.** В групповом режиме ключ обязан быть в ростере — он там
-зафиксирован, поэтому подмена ключа участника невозможна в принципе, а не
-обнаруживается постфактум. В режиме один на один ростера нет, и работает TOFU:
-первый ключ запоминается, несовпадение при следующем соединении — отказ.
+Про очередь событий. Она **ограничена**, и это не формальность: в сессии стоит
+предел на входящие сообщения, но меш вычитывает сессию непрерывно и складывает
+всё сюда. Пока очередь была неограниченной, ограничение уровнем ниже не значило
+ничего — давление просто переезжало наверх, где его никто не сдерживал. Теперь
+при переполнении читающая задача притормаживает, TCP-окно закрывается, и
+отправитель замедляется сам.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from dataclasses import dataclass
+import time
 from pathlib import Path
 
-from ..crypto.identity import Identity, fingerprint
-from ..net.discovery import Discovery
-from ..net.link import LinkClosed
-from ..net.tcp import TcpLink, serve
+from ..crypto.identity import Identity
 from . import events as ev
 from .envelope import (
     TYPE_ADDRESS,
@@ -40,38 +31,68 @@ from .envelope import (
     TYPE_TEXT,
     Envelope,
     EnvelopeError,
-    LamportClock,
     make,
 )
 from .files import (
+    TRANSFER_ID_LEN,
     IncomingTransfer,
     OutgoingTransfer,
     TransferError,
     decode_id,
 )
+from .network import PeerNetwork
 from .roster import Member, Roster
-from .session import Session, SessionError, build_prologue
-from .trust import TrustDecision, TrustStore
+from .trust import TrustStore
 
-RECONNECT_DELAY = 5.0
-FIRST_RECONNECT_DELAY = 0.25
-MAX_DIAL_BACKOFF = 2.0  # пока кого-то не хватает, дольше двух секунд не ждём
-MAX_NICK_LEN = 32
+EVENT_QUEUE_LIMIT = 512
+
+# Сколько предложений файлов от одного участника держим одновременно и сколько
+# ждём ответа. Без предела поток предложений — это и рост памяти, и заваленный
+# уведомлениями чат.
+MAX_PENDING_OFFERS_PER_PEER = 3
+MAX_OUTGOING_OFFERS_PER_PEER = 3
+OFFER_TTL = 300.0
+TRANSFER_IDLE_TIMEOUT = 120.0
+SWEEP_INTERVAL = 10.0
+
+# Пауза между кусками файла. Куски идут в ту же сессию, что и реплики, поэтому
+# сплошной поток делает разговор с этим участником односторонней трубой до конца
+# передачи. Короткая пауза каждые несколько кусков даёт тексту пройти между
+# ними; на 64 МиБ это добавляет меньше секунды.
+CHUNKS_BETWEEN_PAUSES = 16
+CHUNK_PAUSE = 0.005
 
 
-@dataclass
-class Connection:
-    member: Member
-    session: Session
-    reader: asyncio.Task
+class _Incoming:
+    """Принимаемая передача плюс отметка о последней активности."""
 
-    @property
-    def nick(self) -> str:
-        return self.member.nick
+    __slots__ = ("owner", "transfer", "touched")
+
+    def __init__(self, owner: bytes, transfer: IncomingTransfer, touched: float) -> None:
+        self.owner = owner
+        self.transfer = transfer
+        self.touched = touched
+
+
+class _Outgoing:
+    """Предложенная передача: кому предложили и когда.
+
+    Раньше здесь лежал голый ``OutgoingTransfer`` без адресата и времени,
+    поэтому предложение, на которое никто не ответил, оставалось в памяти
+    навсегда — уборщик был написан только для входящих.
+    """
+
+    __slots__ = ("target", "nick", "transfer", "touched")
+
+    def __init__(self, target: bytes, nick: str, transfer: OutgoingTransfer, touched: float):
+        self.target = target
+        self.nick = nick
+        self.transfer = transfer
+        self.touched = touched
 
 
 class Mesh:
-    """Соединения со всеми участниками и обмен прикладными сообщениями."""
+    """Обмен сообщениями и файлами поверх сети участников."""
 
     def __init__(
         self,
@@ -85,325 +106,188 @@ class Mesh:
         discover_lan: bool = False,
     ) -> None:
         self.identity = identity
-        self.nickname = nickname[:MAX_NICK_LEN]
-        self.roster = roster
-        self.trust = trust
         self.download_dir = Path(download_dir)
-        self.listen = listen
-        self.discover_lan = discover_lan
+        self.events: asyncio.Queue = asyncio.Queue(maxsize=EVENT_QUEUE_LIMIT)
 
-        self.events: asyncio.Queue = asyncio.Queue()
-        self.clock = LamportClock()
-        self._connections: dict[bytes, Connection] = {}
-        self._incoming: dict[bytes, tuple[bytes, IncomingTransfer]] = {}
-        self._outgoing: dict[bytes, OutgoingTransfer] = {}
+        self.network = PeerNetwork(
+            identity,
+            nickname=nickname,
+            roster=roster,
+            trust=trust,
+            listen=listen,
+            discover_lan=discover_lan,
+            emit=self._emit,
+            on_message=self._on_message,
+            on_ready=self._greet,
+        )
+
+        self._incoming: dict[bytes, _Incoming] = {}
+        self._outgoing: dict[bytes, _Outgoing] = {}
         self._tasks: set[asyncio.Task] = set()
-        self._server: asyncio.Server | None = None
-        self._discovery: Discovery | None = None
-        self._discovered: dict[bytes, tuple[str, int]] = {}
-        self._dialing: set[bytes] = set()
-        self._running = False
+        self._janitor: asyncio.Task | None = None
 
-    # --- жизненный цикл -------------------------------------------------------
+    # Проброшенных свойств здесь намеренно нет. Они были — nickname, roster,
+    # trust, peers, listen — и размывали границу, которую разделение слоёв
+    # только что провело: по коду становилось не видно, кто за что отвечает.
+    # Всё, что относится к соединениям, спрашивается у mesh.network явно.
 
-    @property
-    def group_id(self) -> bytes:
-        return self.roster.group_id if self.roster else b""
-
-    @property
-    def prologue(self) -> bytes:
-        mode = "mesh" if self.roster else "direct"
-        return build_prologue(mode=mode, group_id=self.group_id)
-
-    @property
-    def peers(self) -> list[str]:
-        return sorted(conn.nick for conn in self._connections.values())
+    # --- жизненный цикл ---------------------------------------------------------
 
     async def start(self) -> None:
-        self._running = True
-        if self.listen is not None:
-            host, port = self.listen
-            self._server = await serve(host, port, self._on_inbound)
-            actual = self._server.sockets[0].getsockname()[1]
-            self.listen = (host, actual)
-            await self._emit(ev.Notice(f"слушаю {host}:{actual}"))
-        if self.roster is not None:
-            self._spawn(self._dial_loop())
-        if self.discover_lan and self.roster is not None and self.listen is not None:
-            self._discovery = Discovery(
-                group_id=self.group_id,
-                public=self.identity.public,
-                nick=self.nickname,
-                port=self.listen[1],
-                on_peer=self._on_discovered,
-                on_error=self._on_discovery_error,
-            )
-            try:
-                await self._discovery.start()
-                await self._emit(ev.Notice("обнаружение в локальной сети включено"))
-            except OSError as exc:
-                self._discovery = None
-                await self._emit(ev.Notice(f"обнаружение недоступно: {exc}"))
+        await self.network.start()
+        self._janitor = asyncio.create_task(self._sweep_loop())
 
     async def stop(self) -> None:
-        self._running = False
+        if self._janitor is not None:
+            self._janitor.cancel()
+            self._janitor = None
         for task in list(self._tasks):
             task.cancel()
-        for conn in list(self._connections.values()):
-            conn.reader.cancel()
-            await conn.session.close()
-        self._connections.clear()
-        if self._discovery is not None:
-            await self._discovery.stop()
-            self._discovery = None
-        if self._server is not None:
-            self._server.close()
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
+        for entry in list(self._incoming.values()):
+            entry.transfer.decline()
+        self._incoming.clear()
+        self._outgoing.clear()
+        await self.network.stop()
 
-    # --- исходящие соединения -------------------------------------------------
+    # --- отправка ---------------------------------------------------------------
 
-    async def connect_to(self, host: str, port: int) -> None:
-        """Явное подключение (режим один на один или ручной вызов)."""
-        try:
-            link = await TcpLink.connect(host, port)
-            session = await Session.initiate(
-                link,
-                self.identity,
-                prologue=self.prologue,
-                payload=self.nickname.encode("utf-8"),
-            )
-        # pylint: disable-next=broad-exception-caught
-        except Exception as exc:
-            await self._emit(ev.Notice(f"не удалось соединиться с {host}:{port}: {exc}"))
-            return
-        self.trust.remember_address(session.remote_static, host, port)
-        await self._register(session)
+    async def broadcast(self, text: str) -> None:
+        await self.network.broadcast(make(TYPE_TEXT, text.encode("utf-8")).encode())
 
-    def _candidate_address(self, member: Member) -> tuple[str, int] | None:
-        """Откуда узнаём, куда звонить: три источника по убыванию свежести.
-
-        Бикон из локальной сети — самый свежий; последний удавшийся адрес
-        переживает смену IP; адрес из ростера — то, что записали руками.
-        """
-        discovered = self._discovered.get(member.public)
-        if discovered is not None:
-            return discovered
-        record = self.trust.by_key(member.public)
-        if record is not None and record.endpoint is not None:
-            return record.endpoint
-        return member.address
-
-    def _should_dial(self, member: Member) -> bool:
-        if self._candidate_address(member) is None:
-            return False
-        if self.listen is None:
-            return True
-        return self.identity.public < member.public
-
-    def _on_discovery_error(self, message: str) -> None:
-        """Молчащее обнаружение хуже отсутствующего — говорим вслух один раз."""
-        self.events.put_nowait(
-            ev.Notice(
-                f"обнаружение в сети не работает ({message}); "
-                "укажите адреса в ростере или подключитесь через /connect"
-            )
+    async def send_text(self, nick: str, text: str) -> bool:
+        return await self.network.send_to_nick(
+            nick, make(TYPE_TEXT, text.encode("utf-8")).encode()
         )
 
-    def _on_discovered(self, public: bytes, host: str, port: int, _nick: str) -> None:
-        if self.roster is None or self.roster.by_key(public) is None:
-            return  # бикон не из нашей группы или от неизвестного ключа
-        if self._discovered.get(public) == (host, port):
-            return
-        self._discovered[public] = (host, port)
-
-    async def _dial_loop(self) -> None:
-        """Дозванивается до тех, кому положено звонить нам.
-
-        Пока кто-то из группы не на связи, пауза растёт от четверти секунды до
-        двух — пиры поднимаются вразнобой, и ждать дольше только потому, что
-        сосед запустился на мгновение позже, незачем. Когда все собрались,
-        интервал уходит на пять секунд и перестаёт шуметь.
-        """
-        if self.roster is None:
-            return
-        delay = FIRST_RECONNECT_DELAY
-        while self._running:
-            expected = [
-                member
-                for member in self.roster.others(self.identity.public)
-                if self._should_dial(member)
-            ]
-            for member in expected:
-                if member.public in self._connections or member.public in self._dialing:
-                    continue  # звонок уже в пути: второй создал бы дубликат
-                candidate = self._candidate_address(member)
-                if candidate is None:
-                    continue
-                host, port = candidate
-                self._dialing.add(member.public)
-                try:
-                    link = await TcpLink.connect(host, port)
-                    session = await Session.initiate(
-                        link,
-                        self.identity,
-                        prologue=self.prologue,
-                        payload=self.nickname.encode("utf-8"),
-                    )
-                # pylint: disable-next=broad-exception-caught
-                except Exception:
-                    continue  # пир ещё не поднялся — попробуем на следующем круге
-                finally:
-                    self._dialing.discard(member.public)
-                self.trust.remember_address(member.public, host, port)
-                await self._register(session)
-
-            everyone_here = all(member.public in self._connections for member in expected)
-            delay = RECONNECT_DELAY if everyone_here else min(delay * 2, MAX_DIAL_BACKOFF)
-            await asyncio.sleep(delay)
-
-    async def _on_inbound(self, link: TcpLink) -> None:
-        try:
-            session = await Session.accept(
-                link,
-                self.identity,
-                prologue=self.prologue,
-                payload=self.nickname.encode("utf-8"),
-            )
-        # pylint: disable-next=broad-exception-caught
-        except Exception as exc:
-            # Кто угодно может постучаться в открытый порт; неудачный хендшейк
-            # не повод ронять слушающий сокет.
-            await self._emit(ev.Notice(f"входящее соединение отклонено: {exc}"))
-            return
-        await self._register(session)
-        conn = self._connections.get(session.remote_static)
-        if conn is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await conn.reader
-
-    # --- регистрация и проверка доверия ---------------------------------------
-
-    async def _register(self, session: Session) -> None:
-        public = session.remote_static
-        member = await self._authorize(session, public)
-        if member is None:
-            await session.close()
-            return
-
-        if public in self._connections:
-            # Гонка: пир позвонил одновременно с нами. Оставляем ту сессию,
-            # где звонил обладатель меньшего ключа.
-            await self._emit(ev.Notice(f"повторное соединение с {member.nick} закрыто"))
-            await session.close()
-            return
-
-        decision = self.trust.check(member.nick, public)
-        if decision is TrustDecision.NEW:
-            self.trust.remember(member.nick, public)
-
-        reader = asyncio.create_task(self._read_peer(member, session))
-        self._connections[public] = Connection(member=member, session=session, reader=reader)
-
-        await self._emit(
-            ev.PeerConnected(
-                nick=member.nick,
-                public=public,
-                sas=session.sas,
-                verified=decision is TrustDecision.VERIFIED,
-            )
+    async def _greet(self, member: Member) -> None:
+        """Что говорим сразу после установки соединения."""
+        await self.network.send(
+            member.public, make(TYPE_PRESENCE, self.network.nickname.encode()).encode()
         )
-        await self._send_to_session(
-            session, make(TYPE_PRESENCE, self.clock, self.nickname.encode())
-        )
-        if self.listen is not None:
+        if self.network.listen is not None:
             # Сообщаем свой порт внутри уже зашифрованного канала: тот, кто с
-            # нами хоть раз соединился, переживёт смену нашего IP. Хост не шлём —
-            # пир и так видит, откуда мы пришли, а мы своего внешнего адреса
-            # обычно не знаем (за NAT в self.listen лежит 0.0.0.0).
-            await self._send_to_session(
-                session, make(TYPE_ADDRESS, self.clock, self.listen[1].to_bytes(2, "big"))
-            )
+            # нами соединился, переживёт смену нашего IP.
+            port = self.network.listen[1].to_bytes(2, "big")
+            await self.network.send(member.public, make(TYPE_ADDRESS, port).encode())
 
-    async def _authorize(self, session: Session, public: bytes) -> Member | None:
-        """Решает, кого пускать, и возвращает участника с его ником."""
-        if self.roster is not None:
-            member = self.roster.by_key(public)
-            if member is None:
-                await self._emit(
-                    ev.Alert(
-                        "соединение с ключом, которого нет в ростере: "
-                        f"{fingerprint(public)} — отклонено"
-                    )
-                )
-                return None
-            return member
+    # --- файлы -------------------------------------------------------------------
 
-        # Режим один на один: ник берём из полезной нагрузки хендшейка.
-        raw = session.peer_payload[:MAX_NICK_LEN]
-        try:
-            nick = raw.decode("utf-8").strip() or fingerprint(public)[:9]
-        except UnicodeDecodeError:
-            nick = fingerprint(public)[:9]
-
-        decision = self.trust.check(nick, public)
-        if decision is TrustDecision.KEY_CHANGED:
+    async def offer_file(self, nick: str, path: str | Path) -> None:
+        member = self.network.member_by_nick(nick)
+        if member is None:
+            await self._emit(ev.Notice(f"участник {nick} не на связи"))
+            return
+        waiting = sum(1 for item in self._outgoing.values() if item.target == member.public)
+        if waiting >= MAX_OUTGOING_OFFERS_PER_PEER:
             await self._emit(
-                ev.Alert(
-                    f"у {nick} ДРУГОЙ ключ, чем записан ранее ({fingerprint(public)}). "
-                    "Это либо переустановка у собеседника, либо подмена. Соединение "
-                    f"отклонено. Если ключ действительно сменился — /forget {nick}"
-                )
+                ev.Notice(f"{nick} ещё не ответил на предыдущие предложения — подождите")
             )
-            return None
-        return Member(nick=nick, public=public)
+            return
 
-    # --- приём ---------------------------------------------------------------
-
-    async def _read_peer(self, member: Member, session: Session) -> None:
-        """Читает сообщения пира до обрыва.
-
-        В конце убирает из таблицы ИМЕННО СВОЮ сессию. Раньше запись удалялась
-        по ключу пира: при гонке дубликатов закрытие лишнего соединения выносило
-        из таблицы живое, и участник пропадал из чата, продолжая быть на связи.
-        """
-        reason = "соединение закрыто"
         try:
-            while True:
-                raw = await session.receive()
-                try:
-                    envelope = Envelope.decode(raw)
-                except EnvelopeError as exc:
-                    await self._emit(ev.Notice(f"мусор от {member.nick}: {exc}"))
-                    continue
-                self.clock.observe(envelope.lamport)
-                await self._handle(member, session, envelope)
-        except asyncio.CancelledError:
-            raise  # отмена задачи не должна попасть в общий обработчик ниже
-        except LinkClosed as exc:
-            reason = str(exc)
-        # pylint: disable-next=broad-exception-caught
-        except Exception as exc:
-            reason = f"ошибка: {exc}"
-        finally:
-            current = self._connections.get(member.public)
-            mine = current is not None and current.session is session
-            if mine:
-                self._connections.pop(member.public, None)
-            await session.close()
-            if mine:
-                self._drop_transfers(member.public)
-                await self._emit(ev.PeerDisconnected(member.nick, reason))
+            # Построение считает BLAKE2b по всему файлу. В цикле событий это
+            # замораживает чат на всё время хеширования, поэтому — в поток.
+            transfer = await asyncio.to_thread(OutgoingTransfer, path=Path(path))
+        except TransferError as exc:
+            await self._emit(ev.Notice(str(exc)))
+            return
+        self._outgoing[transfer.transfer_id] = _Outgoing(
+            target=member.public, nick=nick, transfer=transfer, touched=time.monotonic()
+        )
+        await self.network.send(
+            member.public, make(TYPE_FILE_OFFER, transfer.offer_body()).encode()
+        )
+        await self._emit(ev.Notice(f"предложил {nick} файл «{transfer.name}», жду ответа"))
 
-    async def _handle(self, member: Member, session: Session, envelope: Envelope) -> None:
+    async def respond_to_offer(self, short_id: str, accept: bool) -> None:
+        """Принимает или отклоняет предложение по началу идентификатора.
+
+        Пустая строка не годится: ``"abc".startswith("")`` истинно, поэтому
+        `/accept` без аргумента принимал первое попавшееся предложение — ровно
+        тот файл, который принимать не собирались. Неоднозначный префикс тоже
+        отклоняется: угаданный не тот файл хуже переспроса.
+        """
+        short_id = short_id.strip().lower()
+        if not short_id:
+            await self._emit(ev.Notice("укажите идентификатор: /accept <id> или /decline <id>"))
+            return
+
+        matches = [
+            transfer_id for transfer_id in self._incoming if transfer_id.hex().startswith(short_id)
+        ]
+        if not matches:
+            await self._emit(ev.Notice(f"нет предложения файла с идентификатором {short_id}"))
+            return
+        if len(matches) > 1:
+            options = ", ".join(item.hex()[:8] for item in matches)
+            await self._emit(ev.Notice(f"под «{short_id}» подходит несколько: {options}"))
+            return
+
+        await self._respond(matches[0], accept)
+
+    async def _respond(self, transfer_id: bytes, accept: bool) -> None:
+        entry = self._incoming[transfer_id]
+        if not self.network.is_connected(entry.owner):
+            entry.transfer.decline()
+            self._incoming.pop(transfer_id, None)
+            return
+
+        if accept:
+            try:
+                entry.transfer.accept()
+            except OSError as exc:
+                # Каталог загрузок может быть недоступен: нет прав, кончилось
+                # место, на его месте файл. Это не повод ронять весь чат.
+                self._incoming.pop(transfer_id, None)
+                await self.network.send(
+                    entry.owner, make(TYPE_FILE_DECLINE, transfer_id).encode()
+                )
+                await self._emit(
+                    ev.FileFailed("", entry.transfer.name, f"не удалось начать приём: {exc}")
+                )
+                return
+            entry.touched = time.monotonic()
+            kind = TYPE_FILE_ACCEPT
+        else:
+            entry.transfer.decline()
+            self._incoming.pop(transfer_id, None)
+            kind = TYPE_FILE_DECLINE
+        await self.network.send(entry.owner, make(kind, transfer_id).encode())
+
+    async def _push_file(self, member: Member, transfer: OutgoingTransfer) -> None:
+        try:
+            for index, chunk in enumerate(transfer.chunks()):
+                sent = await self.network.send(
+                    member.public, make(TYPE_FILE_CHUNK, chunk).encode()
+                )
+                if not sent:
+                    raise TransferError("соединение потеряно")
+                if index % CHUNKS_BETWEEN_PAUSES == CHUNKS_BETWEEN_PAUSES - 1:
+                    await asyncio.sleep(CHUNK_PAUSE)
+            await self.network.send(
+                member.public, make(TYPE_FILE_DONE, transfer.transfer_id).encode()
+            )
+            await self._emit(ev.FileSent(member.nick, transfer.name))
+        except (TransferError, OSError) as exc:
+            await self._emit(ev.FileFailed(member.nick, transfer.name, str(exc)))
+        finally:
+            self._outgoing.pop(transfer.transfer_id, None)
+
+    # --- приём --------------------------------------------------------------------
+
+    async def _on_message(self, member: Member, raw: bytes) -> None:
+        try:
+            envelope = Envelope.decode(raw)
+        except EnvelopeError as exc:
+            await self._emit(ev.Notice(f"мусор от {member.nick}: {exc}"))
+            return
+
         if envelope.type == TYPE_TEXT:
-            text = envelope.body.decode("utf-8", errors="replace")
             await self._emit(
                 ev.TextMessage(
                     nick=member.nick,
                     public=member.public,
-                    text=text,
-                    lamport=envelope.lamport,
+                    text=envelope.body.decode("utf-8", errors="replace"),
                     is_bot=member.is_bot,
                 )
             )
@@ -413,175 +297,137 @@ class Mesh:
             return
 
         if envelope.type == TYPE_ADDRESS:
-            self._remember_announced_address(member, session, envelope.body)
+            if len(envelope.body) == 2:
+                self.network.remember_peer_port(member, int.from_bytes(envelope.body, "big"))
             return
 
         try:
-            await self._handle_file(member, session, envelope)
+            await self._handle_file(member, envelope)
         except TransferError as exc:
             await self._emit(ev.FileFailed(member.nick, "", str(exc)))
 
-    async def _handle_file(self, member: Member, session: Session, envelope: Envelope) -> None:
+    async def _handle_file(self, member: Member, envelope: Envelope) -> None:
         if envelope.type == TYPE_FILE_OFFER:
-            transfer = IncomingTransfer.from_offer(envelope.body, self.download_dir)
-            self._incoming[transfer.transfer_id] = (member.public, transfer)
-            await self._emit(
-                ev.FileOffered(
-                    nick=member.nick,
-                    transfer_id=transfer.transfer_id.hex()[:8],
-                    name=transfer.name,
-                    size=transfer.size,
-                )
-            )
-            return
+            await self._on_offer(member, envelope.body)
 
-        if envelope.type == TYPE_FILE_ACCEPT:
+        elif envelope.type == TYPE_FILE_ACCEPT:
+            outgoing = self._outgoing.get(decode_id(envelope.body))
+            if outgoing is not None and outgoing.target == member.public:
+                outgoing.touched = time.monotonic()
+                self._spawn(self._push_file(member, outgoing.transfer))
+
+        elif envelope.type == TYPE_FILE_DECLINE:
             transfer_id = decode_id(envelope.body)
             outgoing = self._outgoing.get(transfer_id)
-            if outgoing is None:
-                return
-            self._spawn(self._push_file(member, session, outgoing))
-            return
+            if outgoing is not None and outgoing.target == member.public:
+                self._outgoing.pop(transfer_id, None)
+                await self._emit(
+                    ev.FileFailed(member.nick, outgoing.transfer.name, "получатель отказался")
+                )
 
-        if envelope.type == TYPE_FILE_DECLINE:
-            transfer_id = decode_id(envelope.body)
-            outgoing = self._outgoing.pop(transfer_id, None)
-            if outgoing is not None:
-                await self._emit(ev.FileFailed(member.nick, outgoing.name, "получатель отказался"))
-            return
-
-        if envelope.type == TYPE_FILE_CHUNK:
-            entry = self._incoming.get(envelope.body[:16])
+        elif envelope.type == TYPE_FILE_CHUNK:
+            transfer_id = envelope.body[:TRANSFER_ID_LEN]
+            entry = self._incoming.get(transfer_id)
             if entry is None:
                 return
-            owner, transfer = entry
-            if owner != member.public:
+            if entry.owner != member.public:
                 raise TransferError("кусок пришёл не от того участника")
-            transfer.add_chunk(envelope.body)
-            return
-
-        if envelope.type == TYPE_FILE_DONE:
-            transfer_id = decode_id(envelope.body)
-            entry = self._incoming.pop(transfer_id, None)
-            if entry is None:
-                return
-            owner, transfer = entry
-            if owner != member.public:
-                raise TransferError("завершение пришло не от того участника")
             try:
-                path = transfer.finish()
+                entry.transfer.add_chunk(envelope.body)
             except TransferError as exc:
-                await self._emit(ev.FileFailed(member.nick, transfer.name, str(exc)))
+                # Битую передачу закрываем сразу, а не оставляем уборщику:
+                # продолжать её всё равно нельзя, а .part занимает место.
+                entry.transfer.decline()
+                self._incoming.pop(transfer_id, None)
+                await self._emit(ev.FileFailed(member.nick, entry.transfer.name, str(exc)))
                 return
-            await self._emit(ev.FileFinished(member.nick, transfer.name, path))
+            entry.touched = time.monotonic()
 
-    def _remember_announced_address(self, member: Member, session: Session, body: bytes) -> None:
-        """Записывает адрес, по которому этот пир будет доступен впредь.
+        elif envelope.type == TYPE_FILE_DONE:
+            await self._finish_incoming(member, decode_id(envelope.body))
 
-        Порт пир называет сам, а хост мы берём из фактического сокета: свой
-        внешний адрес пир обычно не знает, зато мы его видим.
-        """
-        if len(body) != 2:
+    async def _finish_incoming(self, member: Member, transfer_id: bytes) -> None:
+        entry = self._incoming.get(transfer_id)
+        if entry is None:
             return
-        port = int.from_bytes(body, "big")
-        if not 1 <= port <= 65535:
-            return
-        observed = self._observed_host(session)
-        if observed:
-            self.trust.remember_address(member.public, observed, port)
-
-    @staticmethod
-    def _observed_host(session: Session) -> str | None:
-        description = getattr(session, "link_description", "")
-        host, _, _port = description.rpartition(":")
-        return host or None
-
-    # --- отправка -------------------------------------------------------------
-
-    async def broadcast(self, text: str) -> None:
-        envelope = make(TYPE_TEXT, self.clock, text.encode("utf-8"))
-        for conn in list(self._connections.values()):
-            await self._send_to_session(conn.session, envelope)
-
-    async def send_text(self, nick: str, text: str) -> bool:
-        conn = self._connection_by_nick(nick)
-        if conn is None:
-            return False
-        await self._send_to_session(conn.session, make(TYPE_TEXT, self.clock, text.encode("utf-8")))
-        return True
-
-    async def offer_file(self, nick: str, path: str | Path) -> None:
-        conn = self._connection_by_nick(nick)
-        if conn is None:
-            await self._emit(ev.Notice(f"участник {nick} не на связи"))
-            return
+        if entry.owner != member.public:
+            # Проверка ДО снятия записи: иначе чужое сообщение выбивало бы
+            # передачу из списка вместе с доступом к её временному файлу.
+            raise TransferError("завершение пришло не от того участника")
+        self._incoming.pop(transfer_id, None)
         try:
-            transfer = OutgoingTransfer(path=Path(path))
+            # finish() перечитывает и хеширует весь временный файл — тоже в поток.
+            path = await asyncio.to_thread(entry.transfer.finish)
         except TransferError as exc:
-            await self._emit(ev.Notice(str(exc)))
+            await self._emit(ev.FileFailed(member.nick, entry.transfer.name, str(exc)))
             return
-        self._outgoing[transfer.transfer_id] = transfer
-        await self._send_to_session(
-            conn.session, make(TYPE_FILE_OFFER, self.clock, transfer.offer_body())
-        )
-        await self._emit(ev.Notice(f"предложил {nick} файл «{transfer.name}», жду ответа"))
+        await self._emit(ev.FileFinished(member.nick, entry.transfer.name, path))
 
-    async def respond_to_offer(self, short_id: str, accept: bool) -> None:
-        for transfer_id, (owner, transfer) in list(self._incoming.items()):
-            if not transfer_id.hex().startswith(short_id):
-                continue
-            conn = self._connections.get(owner)
-            if conn is None:
-                self._incoming.pop(transfer_id, None)
-                return
-            if accept:
-                transfer.accept()
-                await self._send_to_session(
-                    conn.session, make(TYPE_FILE_ACCEPT, self.clock, transfer_id)
-                )
-            else:
-                transfer.decline()
-                self._incoming.pop(transfer_id, None)
-                await self._send_to_session(
-                    conn.session, make(TYPE_FILE_DECLINE, self.clock, transfer_id)
-                )
-            return
-        await self._emit(ev.Notice(f"нет предложения файла с идентификатором {short_id}"))
+    async def _on_offer(self, member: Member, body: bytes) -> None:
+        transfer = IncomingTransfer.from_offer(body, self.download_dir)
 
-    async def _push_file(
-        self, member: Member, session: Session, transfer: OutgoingTransfer
-    ) -> None:
-        try:
-            for chunk in transfer.chunks():
-                await self._send_to_session(session, make(TYPE_FILE_CHUNK, self.clock, chunk))
-            await self._send_to_session(
-                session, make(TYPE_FILE_DONE, self.clock, transfer.transfer_id)
+        pending = sum(1 for entry in self._incoming.values() if entry.owner == member.public)
+        if pending >= MAX_PENDING_OFFERS_PER_PEER:
+            # Отказываем вслух: молчание оставило бы отправителя ждать вечно.
+            await self.network.send(
+                member.public, make(TYPE_FILE_DECLINE, transfer.transfer_id).encode()
             )
-            await self._emit(ev.FileSent(member.nick, transfer.name))
-        except (LinkClosed, SessionError, OSError) as exc:
-            await self._emit(ev.FileFailed(member.nick, transfer.name, str(exc)))
-        finally:
-            self._outgoing.pop(transfer.transfer_id, None)
+            await self._emit(
+                ev.Notice(f"{member.nick} шлёт слишком много предложений файлов — отклонил")
+            )
+            return
 
-    # --- служебное ------------------------------------------------------------
+        self._incoming[transfer.transfer_id] = _Incoming(
+            owner=member.public, transfer=transfer, touched=time.monotonic()
+        )
+        await self._emit(
+            ev.FileOffered(
+                nick=member.nick,
+                transfer_id=transfer.transfer_id.hex()[:8],
+                name=transfer.name,
+                size=transfer.size,
+            )
+        )
 
-    async def _send_to_session(self, session: Session, envelope: Envelope) -> None:
-        try:
-            await session.send(envelope.encode())
-        except (LinkClosed, SessionError):
-            pass  # разрыв заметит читающая задача и сообщит один раз
+    # --- уборка ----------------------------------------------------------------------
 
-    def _connection_by_nick(self, nick: str) -> Connection | None:
-        for conn in self._connections.values():
-            if conn.nick == nick:
-                return conn
-        return None
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(SWEEP_INTERVAL)
+            await self.sweep(time.monotonic())
 
-    def _drop_transfers(self, public: bytes) -> None:
-        for transfer_id, (owner, transfer) in list(self._incoming.items()):
-            if owner == public:
-                transfer.decline()
-                self._incoming.pop(transfer_id, None)
+    async def sweep(self, now: float) -> None:
+        """Убирает зависшее с обеих сторон.
+
+        Принятая, но не завершённая передача иначе навсегда оставляла бы файл
+        `.part` на диске, а предложение, на которое не ответили, — запись в
+        памяти отправителя.
+        """
+        await self._sweep_outgoing(now)
+        for transfer_id, entry in list(self._incoming.items()):
+            active = entry.transfer.is_active
+            limit = TRANSFER_IDLE_TIMEOUT if active else OFFER_TTL
+            gone = not self.network.is_connected(entry.owner)
+            expired = now - entry.touched > limit
+            if not (gone or expired):
+                continue
+
+            entry.transfer.decline()
+            self._incoming.pop(transfer_id, None)
+            if expired and not gone and active:
+                await self._emit(
+                    ev.FileFailed("", entry.transfer.name, "передача заброшена — отменена")
+                )
+
+    async def _sweep_outgoing(self, now: float) -> None:
+        for transfer_id, item in list(self._outgoing.items()):
+            gone = not self.network.is_connected(item.target)
+            expired = now - item.touched > OFFER_TTL
+            if not (gone or expired):
+                continue
+            self._outgoing.pop(transfer_id, None)
+            reason = "участник отключился" if gone else "никто не ответил"
+            await self._emit(ev.FileFailed(item.nick, item.transfer.name, reason))
 
     async def _emit(self, event: ev.Event) -> None:
         await self.events.put(event)

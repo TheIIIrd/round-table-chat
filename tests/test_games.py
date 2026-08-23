@@ -9,10 +9,8 @@ from __future__ import annotations
 
 from random import Random
 
-import pytest
-
 from p2pchat.games import build_host
-from p2pchat.games.api import Finish, Say, Whisper
+from p2pchat.games.api import Finish, Whisper
 from p2pchat.games.connect_four import COLUMNS, TURN_TIMEOUT, ConnectFour
 from p2pchat.games.lobby import GameHost, Phase
 

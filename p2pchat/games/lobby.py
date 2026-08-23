@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from random import Random
@@ -43,8 +42,6 @@ GAME_ALIASES = {
     "четыревряд": "c4",
 }
 
-GameFactory = Callable[[Random], Game]
-
 
 class Phase(Enum):
     IDLE = "idle"
@@ -54,15 +51,20 @@ class Phase(Enum):
 
 @dataclass
 class GameHost:
-    """Одна активная партия (или её отсутствие) на весь чат."""
+    """Одна активная партия (или её отсутствие) на весь чат.
 
-    catalog: dict[str, GameFactory]
+    Каталог хранит КЛАССЫ, а не фабрики: чтобы прочитать название и число
+    игроков, не нужно создавать партию. Раньше каждый «!game» строил
+    полноценного дурака только ради заголовка — вместе с тасовкой колоды.
+    """
+
+    catalog: dict[str, type]
     rng: Random
     gather_timeout: float = GATHER_TIMEOUT
 
     phase: Phase = Phase.IDLE
     game: Game | None = None
-    pending: GameFactory | None = None
+    pending: type | None = None
     pending_name: str = ""
     players: list[str] = field(default_factory=list)
     opener: str = ""
@@ -114,29 +116,27 @@ class GameHost:
     def _open(self, player: str, name: str, now: float) -> list[Action]:
         if not name:
             listing = ", ".join(
-                f"{key} — {factory(Random(0)).title}"
-                for key, factory in sorted(self.catalog.items())
+                f"{key} — {cls.title}" for key, cls in sorted(self.catalog.items())
             )
             return [Say(f"Доступные игры: {listing}\nНачать: !game <имя>, затем !join и !start")]
 
         if self.phase is not Phase.IDLE:
             return [Say(f"{player}: уже идёт «{self._current_title()}». Сначала !stop.")]
 
-        factory = self.catalog.get(GAME_ALIASES.get(name.lower(), name.lower()))
-        if factory is None:
+        game_class = self.catalog.get(GAME_ALIASES.get(name.lower(), name.lower()))
+        if game_class is None:
             return [Say(f"{player}: игра «{name}» неизвестна. !game покажет список.")]
 
-        probe = factory(Random(0))
         self.phase = Phase.GATHERING
-        self.pending = factory
+        self.pending = game_class
         self.pending_name = GAME_ALIASES.get(name.lower(), name.lower())
         self.players = [player]
         self.opener = player
         self.opened_at = now
         return [
             Say(
-                f"{player} собирает игру «{probe.title}» "
-                f"({probe.min_players}–{probe.max_players} игроков).\n"
+                f"{player} собирает игру «{game_class.title}» "
+                f"({game_class.min_players}–{game_class.max_players} игроков).\n"
                 f"Присоединиться: !join. Начать: !start."
             )
         ]
@@ -149,12 +149,12 @@ class GameHost:
         if player in self.players:
             return [Whisper(player, "Вы уже в списке.")]
 
-        probe = self.pending(Random(0))
-        if len(self.players) >= probe.max_players:
-            return [Whisper(player, f"Мест нет: максимум {probe.max_players}.")]
+        limit = self.pending.max_players
+        if len(self.players) >= limit:
+            return [Whisper(player, f"Мест нет: максимум {limit}.")]
 
         self.players.append(player)
-        return [Say(f"{player} в игре ({len(self.players)}/{probe.max_players}). {self._need()}")]
+        return [Say(f"{player} в игре ({len(self.players)}/{limit}). {self._need()}")]
 
     def _leave(self, player: str, *, voluntary: bool) -> list[Action]:
         if self.phase is Phase.GATHERING and player in self.players:
@@ -167,6 +167,9 @@ class GameHost:
             return [Say(f"{player} вышел из списка. {self._need()}")]
 
         if self.phase is Phase.RUNNING and self.game is not None and player in self.players:
+            # Убираем из состава: иначе !who показывал бы ушедшего, а при
+            # возвращении ему присылали бы состояние партии, из которой он выбыл.
+            self.players.remove(player)
             actions = self._collect(self.game.on_leave(player))
             return [Say(f"{player} покинул партию."), *actions]
 
@@ -178,9 +181,9 @@ class GameHost:
         if self.phase is not Phase.GATHERING or self.pending is None:
             return [Whisper(player, "Нечего запускать: сбор не идёт.")]
 
-        probe = self.pending(Random(0))
-        if len(self.players) < probe.min_players:
-            return [Whisper(player, f"Нужно хотя бы {probe.min_players} игроков. {self._need()}")]
+        needed = self.pending.min_players
+        if len(self.players) < needed:
+            return [Whisper(player, f"Нужно хотя бы {needed} игроков. {self._need()}")]
 
         self.game = self.pending(self.rng)
         self.phase = Phase.RUNNING
@@ -239,15 +242,14 @@ class GameHost:
     def _need(self) -> str:
         if self.pending is None:
             return ""
-        probe = self.pending(Random(0))
-        missing = probe.min_players - len(self.players)
+        missing = self.pending.min_players - len(self.players)
         return f"Нужно ещё {missing}." if missing > 0 else "Можно начинать: !start."
 
     def _current_title(self) -> str:
         if self.game is not None:
             return self.game.title
         if self.pending is not None:
-            return self.pending(Random(0)).title
+            return self.pending.title
         return "—"
 
     def _reset(self) -> None:

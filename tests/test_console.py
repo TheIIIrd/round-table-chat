@@ -24,17 +24,32 @@ from p2pchat.ui.console import Console
 from p2pchat.ui.style import Palette
 
 
+class FakeNetwork:
+    """Сеть-заглушка: запоминает вызовы вместо работы с сокетами."""
+
+    # Поля-журналы, которых в настоящем классе нет и быть не должно.
+    RECORDING = {"connects"}
+
+    def __init__(self) -> None:
+        self.peers: list[str] = ["bob"]
+        self.connects: list[tuple[str, int]] = []
+
+    async def connect_to(self, host: str, port: int) -> None:
+        self.connects.append((host, port))
+
+
 class FakeMesh:
     """Меш-заглушка: запоминает вызовы вместо работы с сетью."""
 
+    RECORDING = {"broadcasts", "offers", "responses"}
+
     def __init__(self, identity: Identity) -> None:
         self.identity = identity
-        self.peers: list[str] = ["bob"]
+        self.network = FakeNetwork()
         self.events: asyncio.Queue = asyncio.Queue()
         self.broadcasts: list[str] = []
         self.offers: list[tuple[str, str]] = []
         self.responses: list[tuple[str, bool]] = []
-        self.connects: list[tuple[str, int]] = []
 
     async def broadcast(self, text: str) -> None:
         self.broadcasts.append(text)
@@ -44,9 +59,6 @@ class FakeMesh:
 
     async def respond_to_offer(self, short_id: str, accept: bool) -> None:
         self.responses.append((short_id, accept))
-
-    async def connect_to(self, host: str, port: int) -> None:
-        self.connects.append((host, port))
 
 
 def build(tmp: Path, *, color: bool = False):
@@ -83,7 +95,7 @@ def test_commands_are_parsed():
         assert console.mesh.identity.fingerprint() in console_output[-1]
 
         run_command(console, "/connect 10.0.0.5:9333")
-        assert mesh.connects == [("10.0.0.5", 9333)]
+        assert mesh.network.connects == [("10.0.0.5", 9333)]
 
         run_command(console, "/connect кривой-адрес")
         assert "формат" in console_output[-1]
@@ -109,17 +121,17 @@ def test_verify_and_forget_change_trust():
         console_output.clear()
         console, _, trust = build(Path(tmp))
         peer = Identity.generate("bob").public
-        trust.remember("bob", peer)
+        trust.remember(peer, "bob")
 
-        assert trust.check("bob", peer).value == "known"
+        assert trust.check(peer, "bob").value == "known"
         run_command(console, "/verify bob")
-        assert trust.check("bob", peer).value == "verified"
+        assert trust.check(peer, "bob").value == "verified"
 
         run_command(console, "/verify незнакомец")
         assert "не найден" in console_output[-1]
 
         run_command(console, "/forget bob")
-        assert trust.check("bob", peer).value == "new"
+        assert trust.check(peer, "bob").value == "new"
 
 
 def test_unverified_peer_is_marked_on_every_line():
@@ -127,17 +139,17 @@ def test_unverified_peer_is_marked_on_every_line():
         console_output.clear()
         console, mesh, trust = build(Path(tmp))
         peer = Identity.generate("bob").public
-        trust.remember("bob", peer)
+        trust.remember(peer, "bob")
 
         async def scenario():
             pump = asyncio.create_task(console._pump_events())
             await mesh.events.put(
-                ev.TextMessage(nick="bob", public=peer, text="первое", lamport=1)
+                ev.TextMessage(nick="bob", public=peer, text="первое")
             )
             await asyncio.sleep(0.01)
             trust.mark_verified("bob")
             await mesh.events.put(
-                ev.TextMessage(nick="bob", public=peer, text="второе", lamport=2)
+                ev.TextMessage(nick="bob", public=peer, text="второе")
             )
             await asyncio.sleep(0.01)
             pump.cancel()
@@ -195,11 +207,11 @@ def test_incoming_text_cannot_drive_the_terminal():
         console_output.clear()
         console, mesh, trust = build(Path(tmp))
         peer = Identity.generate("bob").public
-        trust.remember("bob", peer, verified=True)
+        trust.remember(peer, "bob", verified=True)
 
         hostile = "\x1b[2Jочистка\x1b]0;чужой заголовок\x07\x00"
         line = console._decorate(
-            ev.TextMessage(nick="bob", public=peer, text=hostile, lamport=1)
+            ev.TextMessage(nick="bob", public=peer, text=hostile)
         )
         assert "\x1b[2J" not in line
         assert "\x07" not in line and "\x00" not in line
@@ -214,7 +226,6 @@ def test_bot_lines_are_marked_even_without_color():
                 nick="dice",
                 public=b"\x03" * 32,
                 text="строка\nвторая",
-                lamport=1,
                 is_bot=True,
             )
         )
@@ -231,17 +242,17 @@ def test_marks_survive_color_being_on():
     with tempfile.TemporaryDirectory() as tmp:
         console, _, trust = build(Path(tmp), color=True)
         peer = Identity.generate("bob").public
-        trust.remember("bob", peer)
+        trust.remember(peer, "bob")
 
         unverified = console._decorate(
-            ev.TextMessage(nick="bob", public=peer, text="привет", lamport=1)
+            ev.TextMessage(nick="bob", public=peer, text="привет")
         )
         assert "?" in unverified and "привет" in unverified
         assert "\x1b[" in unverified  # цвет действительно включён
 
         bot_line = console._decorate(
             ev.TextMessage(
-                nick="dice", public=b"\x03" * 32, text="раз\nдва", lamport=1, is_bot=True
+                nick="dice", public=b"\x03" * 32, text="раз\nдва", is_bot=True
             )
         )
         assert bot_line.count("┃") == 2
@@ -282,3 +293,78 @@ def test_prompt_toolkit_console_does_not_print_raw_ansi():
     assert PromptToolkitConsole._write is not _Console._write
     source = inspect.getsource(PromptToolkitConsole._write)
     assert "self._print" in source and "self._ansi" in source
+
+
+def _public_api(cls) -> set[str]:
+    """Имена, доступные у экземпляра: и объявленные в классе, и заведённые в __init__.
+
+    ``hasattr`` на самом классе не видит вторые, поэтому исходник __init__
+    разбирается отдельно.
+    """
+    import ast as _ast
+    import inspect as _inspect
+    import textwrap as _textwrap
+
+    names = {name for name in dir(cls) if not name.startswith("_")}
+    try:
+        source = _textwrap.dedent(_inspect.getsource(cls.__init__))
+    except (OSError, TypeError):  # pragma: no cover
+        return names
+    for node in _ast.walk(_ast.parse(source)):
+        if (
+            isinstance(node, _ast.Attribute)
+            and isinstance(node.value, _ast.Name)
+            and node.value.id == "self"
+            and isinstance(node.ctx, _ast.Store)
+            and not node.attr.startswith("_")
+        ):
+            names.add(node.attr)
+    return names
+
+
+def test_fake_mesh_matches_the_real_interface():
+    """Заглушка обязана повторять настоящий класс.
+
+    Регрессия: снятие фасада убрало `Mesh.connect_to`, консоль сломалась — а
+    тесты прошли, потому что у заглушки метод остался. Заглушка, разошедшаяся с
+    оригиналом, превращает зелёные тесты в ложное спокойствие.
+    """
+    from p2pchat.proto.mesh import Mesh
+    from p2pchat.proto.network import PeerNetwork
+
+    for fake, real in ((FakeMesh, Mesh), (FakeNetwork, PeerNetwork)):
+        available = _public_api(real)
+        promised = _public_api(fake) - fake.RECORDING - {"RECORDING"}
+        missing = sorted(promised - available)
+        assert not missing, f"{fake.__name__} обещает то, чего нет в {real.__name__}: {missing}"
+
+
+def test_console_touches_only_existing_attributes():
+    """Каждое обращение консоли к mesh должно существовать у настоящего класса."""
+    import ast as _ast
+    import inspect as _inspect
+
+    from p2pchat.proto.mesh import Mesh
+    from p2pchat.proto.network import PeerNetwork
+    from p2pchat.ui import console as console_module
+
+    mesh_api, network_api = _public_api(Mesh), _public_api(PeerNetwork)
+    tree = _ast.parse(_inspect.getsource(console_module))
+
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Attribute):
+            continue
+        owner = node.value
+        if not isinstance(owner, _ast.Attribute):
+            continue
+
+        # self.mesh.network.X — спрашиваем у сети
+        if (
+            owner.attr == "network"
+            and isinstance(owner.value, _ast.Attribute)
+            and owner.value.attr == "mesh"
+        ):
+            assert node.attr in network_api, f"консоль зовёт mesh.network.{node.attr}"
+        # self.mesh.X — спрашиваем у меша
+        elif owner.attr == "mesh":
+            assert node.attr in mesh_api, f"консоль зовёт mesh.{node.attr}, которого нет"

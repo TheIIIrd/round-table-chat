@@ -17,7 +17,6 @@ from p2pchat.net.link import LinkClosed, MemoryLink
 from p2pchat.proto import session as sess
 from tests.helpers import TamperLink, drop_all, flip_byte, replace_kind
 from p2pchat.proto.session import (
-    KIND_DATA,
     KIND_REKEY_REQUEST,
     Session,
     SessionError,
@@ -294,5 +293,39 @@ def test_buffered_messages_survive_close():
         with pytest.raises(LinkClosed):
             await b.receive()
         await b.close()
+
+    asyncio.run(scenario())
+
+
+def test_wire_format_change_requires_version_bump():
+    """Страж против молчаливой несовместимости.
+
+    Версия входит в prologue, поэтому расхождение обнаруживается на хендшейке.
+    Но только если версию подняли. Этот тест падает при изменении формата
+    конверта и напоминает поднять её — иначе клиенты соединятся и начнут читать
+    друг друга со сдвигом.
+    """
+    from p2pchat.proto.envelope import HEADER_LEN
+    from p2pchat.proto.session import PROTOCOL_VERSION
+
+    known = {
+        b"p2pchat/2": 9,  # тип(1) + время отправителя(8)
+    }
+    assert PROTOCOL_VERSION in known, "формат изменился — поднимите версию и допишите её сюда"
+    assert HEADER_LEN == known[PROTOCOL_VERSION], (
+        f"заголовок конверта стал {HEADER_LEN} байт при версии "
+        f"{PROTOCOL_VERSION.decode()} — поднимите версию протокола"
+    )
+
+
+def test_different_protocol_versions_fail_loudly():
+    async def scenario():
+        link_a, link_b = MemoryLink.pair()
+        old = build_prologue().replace(b"p2pchat/2", b"p2pchat/1")
+        with pytest.raises(p.InvalidTag):
+            await asyncio.gather(
+                Session.initiate(link_a, Identity.generate(), prologue=build_prologue()),
+                Session.accept(link_b, Identity.generate(), prologue=old),
+            )
 
     asyncio.run(scenario())
