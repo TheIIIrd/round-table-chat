@@ -3,8 +3,9 @@
 
 ### Special ###
 tests/vectors/
-*.key
+*.key*
 known_peers.json
+roster.json
 
 ### Emacs ###
 # -*- mode: gitignore; -*-

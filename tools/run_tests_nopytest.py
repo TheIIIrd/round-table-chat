@@ -76,9 +76,13 @@ def _install_pytest_stub() -> None:
 
             return wrap
 
+    def skip(reason: str = "") -> None:
+        raise Skipped(reason)
+
     stub.raises = raises
     stub.fixture = fixture
     stub.mark = _Mark
+    stub.skip = skip
     stub.Skipped = Skipped
     sys.modules["pytest"] = stub
 
@@ -153,6 +157,7 @@ def _cases(fn):
 
 def main() -> int:
     _install_pytest_stub()
+    Skipped = sys.modules["pytest"].Skipped  # noqa: N806
 
     # Аналог autouse-фикстуры cheap_kdf: боевые параметры Argon2id делают
     # прогон непозволительно долгим.
@@ -204,16 +209,24 @@ def main() -> int:
                         kwargs["monkeypatch"] = patch
                     if "capsys" in parameters:
                         kwargs["capsys"] = capsys
+                    # Вывод перехватывается у каждого теста, как это делает
+                    # pytest, и показывается только при падении. Иначе печать из
+                    # проверяемого кода тонет в прогоне и приучает пропускать
+                    # глазами то, на что стоило бы смотреть.
+                    noise = _CapSys() if "capsys" not in parameters else capsys
                     try:
-                        if "capsys" in parameters:
-                            with redirect_stdout(capsys.out), redirect_stderr(capsys.err):
-                                fn(**kwargs)
-                        else:
+                        with redirect_stdout(noise.out), redirect_stderr(noise.err):
                             fn(**kwargs)
+                    except Skipped as reason:
+                        print(f"SKIP {name}{label}\n     {reason}")
+                        skipped += 1
+                        continue
                     except Exception:
-                        failures.append(
-                            (f"{module_name}.{name}{label}", traceback.format_exc())
-                        )
+                        captured = noise.readouterr()
+                        report = traceback.format_exc()
+                        if captured.out or captured.err:
+                            report += f"\n--- вывод теста ---\n{captured.out}{captured.err}"
+                        failures.append((f"{module_name}.{name}{label}", report))
                         print(f"FAIL {name}{label}")
                         continue
                     finally:

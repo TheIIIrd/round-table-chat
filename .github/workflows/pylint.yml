@@ -21,3 +21,10 @@ jobs:
     - name: Analysing the code with pylint
       run: |
         PYTHONPATH=./ pylint --fail-under=9.00 $(git ls-files '*.py')
+    - name: Download test-vector Noise
+      run: |
+        mkdir -p tests/vectors
+        curl -L -o tests/vectors/cacophony.json \
+          https://raw.githubusercontent.com/mcginty/snow/master/tests/vectors/cacophony.txt
+    - name: Run tests
+      run: PYTHONPATH=./ pytest tests -q
